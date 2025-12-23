@@ -404,18 +404,21 @@ export default class PasteImageRenamePlugin extends Plugin {
 		const activeFile = info.file
 		if (!activeFile) return
 
+		let excludeExtRegex: RegExp|null = null
+		if (this.settings.excludeExtensionPattern) {
+			try {
+				excludeExtRegex = new RegExp(this.settings.excludeExtensionPattern)
+			} catch (err) {
+				console.warn('Invalid excludeExtensionPattern', err)
+			}
+		}
+
 		const files = Array.from(clipboardFiles)
 		const handledFiles = files.filter(file => {
 			const ext = getClipboardFileExtension(file)
 			if (!ext) return false
 			if (this.settings.handleAllAttachments) {
-				if (this.settings.excludeExtensionPattern) {
-					try {
-						if (new RegExp(this.settings.excludeExtensionPattern).test(ext)) return false
-					} catch (err) {
-						console.warn('Invalid excludeExtensionPattern', err)
-					}
-				}
+				if (excludeExtRegex?.test(ext)) return false
 				return true
 			}
 			return isImageExtension(ext) || file.type.startsWith('image/')
@@ -487,7 +490,7 @@ function isImageExtension(ext: string) {
 
 function getClipboardFileExtension(file: File): string {
 	const name = file.name || ''
-	const nameExt = name.includes('.') ? name.split('.').pop()?.toLowerCase() : ''
+	const nameExt = name.includes('.') ? (name.split('.').pop()?.toLowerCase() ?? '') : ''
 	if (nameExt) return nameExt
 	const typePart = file.type?.split('/')[1]
 	if (typePart) {
