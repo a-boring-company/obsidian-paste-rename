@@ -157,7 +157,7 @@ that match the given extension pattern.
   When enabled, the plugin intercepts the paste event itself, creating the attachment and starting the rename flow immediately after you press Ctrl+V so other plugins can use the renamed output.
 - **Handle all attachments**
 
-  If enabled, the plugin will also process non-image attachments instead of only files created with the \"Pasted image\" prefix. Use \"Exclude extension pattern\" to skip certain types.
+  If enabled, the plugin will also process non-image attachments instead of only files created with the "Pasted image" prefix. Use "Exclude extension pattern" to skip certain types.
 
 - **Exclude extension pattern**
 

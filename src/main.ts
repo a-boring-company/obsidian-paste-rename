@@ -68,7 +68,7 @@ const PASTED_IMAGE_PREFIX = 'Pasted image '
 export default class PasteImageRenamePlugin extends Plugin {
 	settings: PluginSettings
 	modals: Modal[] = []
-	excludeExtensionRegex: RegExp|null = null
+	excludeExtensionRegex: RegExp | null = null
 	pasteCreatedFiles: Set<string> = new Set()
 
 	async onload() {
@@ -432,6 +432,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 		})
 		if (!handledFiles.length) return
 
+		// Avoid default paste handling so we can create and rename attachments before other plugins react.
 		evt.preventDefault()
 
 		let cursor = editor.getCursor()
@@ -445,7 +446,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 			const createdFile = await this.app.vault.createBinary(targetPath, await file.arrayBuffer())
 			const linkText = this.app.fileManager.generateMarkdownLink(createdFile, activeFile.path)
 			editor.replaceRange(linkText, cursor, cursor)
-			cursor = {...cursor, ch: cursor.ch + linkText.length}
+			cursor = editor.getCursor()
 			editor.setCursor(cursor)
 			await this.startRenameProcess(createdFile, this.settings.autoRename)
 		}
