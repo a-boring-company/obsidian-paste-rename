@@ -405,8 +405,9 @@ export default class PasteImageRenamePlugin extends Plugin {
 		try {
 			this.excludeExtensionRegex = new RegExp(pat)
 		} catch (err) {
-			console.warn('Invalid excludeExtensionPattern', err)
+			console.warn('Invalid excludeExtensionPattern', pat, err)
 			this.excludeExtensionRegex = null
+			new Notice('Exclude extension pattern is invalid and was ignored. Please fix it in settings.')
 		}
 	}
 
@@ -444,11 +445,16 @@ export default class PasteImageRenamePlugin extends Plugin {
 				: `${PASTED_IMAGE_PREFIX}${getTimestampForFilename()}.${ext}`
 			const targetPath = await this.app.fileManager.getAvailablePathForAttachment(suggestedName, activeFile.path)
 			this.pasteCreatedFiles.add(targetPath)
-			const createdFile = await this.app.vault.createBinary(targetPath, fileBuffers[index])
-			const linkText = this.app.fileManager.generateMarkdownLink(createdFile, activeFile.path)
-			editor.replaceRange(linkText, cursor, cursor)
-			cursor = editor.getCursor()
-			await this.startRenameProcess(createdFile, this.settings.autoRename)
+			try {
+				const createdFile = await this.app.vault.createBinary(targetPath, fileBuffers[index])
+				const linkText = this.app.fileManager.generateMarkdownLink(createdFile, activeFile.path)
+				editor.replaceRange(linkText, cursor, cursor)
+				cursor = editor.getCursor()
+				await this.startRenameProcess(createdFile, this.settings.autoRename)
+			} catch (err) {
+				console.error('Failed to handle pasted attachment', err)
+				new Notice('Failed to handle pasted attachment. Check console for details.')
+			}
 		}
 	}
 }
@@ -488,6 +494,7 @@ const IMAGE_EXTS = [
 
 function isImage(file: TAbstractFile): boolean {
 	if (file instanceof TFile) {
+		// isImageExtension lowercases internally
 		if (isImageExtension(file.extension)) {
 			return true
 		}
@@ -499,6 +506,7 @@ function isImageExtension(ext: string) {
 	return IMAGE_EXTS.includes(ext.toLowerCase())
 }
 
+// Derive an extension from filename first, then MIME subtype, always lower-cased.
 function getClipboardFileExtension(file: File): string {
 	const name = file.name || ''
 	const nameExt = name.includes('.') ? name.split('.').pop() : ''
