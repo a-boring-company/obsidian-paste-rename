@@ -401,7 +401,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 		const clipboardFiles = evt.clipboardData?.files
 		if (!clipboardFiles || clipboardFiles.length === 0) return
 
-		const activeFile = info instanceof MarkdownView ? info.file : info.file
+		const activeFile = info.file
 		if (!activeFile) return
 
 		const files = Array.from(clipboardFiles)
@@ -474,7 +474,7 @@ const IMAGE_EXTS = [
 
 function isImage(file: TAbstractFile): boolean {
 	if (file instanceof TFile) {
-		if (isImageExtension(file.extension)) {
+		if (isImageExtension(file.extension.toLowerCase())) {
 			return true
 		}
 	}
@@ -487,9 +487,8 @@ function isImageExtension(ext: string) {
 
 function getClipboardFileExtension(file: File): string {
 	const name = file.name || ''
-	if (name.includes('.')) {
-		return name.split('.').pop().toLowerCase()
-	}
+	const nameExt = name.includes('.') ? name.split('.').pop()?.toLowerCase() : ''
+	if (nameExt) return nameExt
 	const typePart = file.type?.split('/')[1]
 	if (typePart) {
 		return typePart.replace(/\+.+$/, '').toLowerCase()
