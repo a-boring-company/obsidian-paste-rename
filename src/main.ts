@@ -436,18 +436,18 @@ export default class PasteImageRenamePlugin extends Plugin {
 		evt.preventDefault()
 
 		let cursor = editor.getCursor()
-		for (const file of handledFiles) {
+		const fileBuffers = await Promise.all(handledFiles.map(file => file.arrayBuffer()))
+		for (const [index, file] of handledFiles.entries()) {
 			const ext = getClipboardFileExtension(file) || 'bin'
 			const suggestedName = file.name && file.name.includes('.')
 				? file.name
 				: `${PASTED_IMAGE_PREFIX}${getTimestampForFilename()}.${ext}`
 			const targetPath = await this.app.fileManager.getAvailablePathForAttachment(suggestedName, activeFile.path)
 			this.pasteCreatedFiles.add(targetPath)
-			const createdFile = await this.app.vault.createBinary(targetPath, await file.arrayBuffer())
+			const createdFile = await this.app.vault.createBinary(targetPath, fileBuffers[index])
 			const linkText = this.app.fileManager.generateMarkdownLink(createdFile, activeFile.path)
 			editor.replaceRange(linkText, cursor, cursor)
 			cursor = editor.getCursor()
-			editor.setCursor(cursor)
 			await this.startRenameProcess(createdFile, this.settings.autoRename)
 		}
 	}
@@ -501,13 +501,9 @@ function isImageExtension(ext: string) {
 
 function getClipboardFileExtension(file: File): string {
 	const name = file.name || ''
-	const nameExt = name.includes('.') ? (name.split('.').pop()?.toLowerCase() ?? '') : ''
-	if (nameExt) return nameExt
-	const typePart = file.type?.split('/')[1]
-	if (typePart) {
-		return typePart.replace(/\+.+$/, '').toLowerCase()
-	}
-	return ''
+	const nameExt = name.includes('.') ? name.split('.').pop() : ''
+	const typePart = file.type?.split('/')[1]?.replace(/\+.+$/, '') ?? ''
+	return (nameExt || typePart || '').toLowerCase()
 }
 
 function getTimestampForFilename() {
