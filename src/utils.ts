@@ -4,7 +4,6 @@ import {
 } from 'obsidian';
 
 export const DEBUG = !(process.env.BUILD_ENV === 'production')
-if (DEBUG) console.log('DEBUG is enabled')
 
 export function debugLog(...args: any[]) {
 	if (DEBUG) {
@@ -76,6 +75,11 @@ const filenameNotAllowedChars = /[^\p{L}0-9~`!@$&*()\-_=+{};'",<.>? ]/ug
 export const sanitizer = {
 	filename(s: string): string {
 		return s.replace(filenameNotAllowedChars, '').trim()
+	},
+
+	// Convert spaces to underscores for cleaner filenames
+	spaceToUnderscore(s: string): string {
+		return s.trim().replace(/ /g, '_')
 	},
 
 	delimiter(s: string): string {

@@ -164,3 +164,33 @@ that match the given extension pattern.
 
   Turn off this option if you don't want to see the notice when renaming images.
 	Note that Obsidian may display a notice when a link has changed, this option cannot disable that.
+- **Output as HTML** *(New)*
+
+  When enabled, renamed images will be inserted as centered HTML image tags instead of markdown links. This integrates with the img2html plugin format. The HTML output includes:
+  - Centered layout with CSS styling
+  - Automatic figure caption generated from image filename (underscores replaced with spaces)
+  - Configurable image width
+  - Optional alt attribute for accessibility
+
+- **HTML image width** *(New)*
+
+  Set the width of images in HTML output. Can be:
+  - Pixels: `500px`
+  - Percentage: `80%` (default)
+  - Auto: `auto`
+
+- **Include alt attribute** *(New)*
+
+  When enabled, HTML image tags will include the alt attribute with the filename for better accessibility and SEO.
+
+- **Use custom image path for HTML** *(New)*
+
+  When enabled, images in HTML output will be referenced using a custom path instead of the current file's directory. This is useful if you organize images in a separate folder.
+
+- **Custom image path** *(New)*
+
+  Set the custom image path for HTML src attribute. Supports:
+  - Relative paths: `./assets`, `../images`
+  - Absolute paths from vault root: `assets`, `images`
+
+  Example: If set to `./assets`, the HTML src will be: `./assets/my_image.jpg`

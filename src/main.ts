@@ -11,6 +11,7 @@
  */
 import {
   App,
+  EventRef,
   HeadingCache,
   MarkdownView,
   Modal,
@@ -34,6 +35,7 @@ import {
   path,
   sanitizer,
 } from './utils';
+import { createHtmlImgTag, extractObsidianEmbedPath } from './img2html';
 
 interface PluginSettings {
 	// {{imageNameKey}}-{{DATE:YYYYMMDD}}
@@ -45,6 +47,11 @@ interface PluginSettings {
 	handleAllAttachments: boolean
 	excludeExtensionPattern: string
 	disableRenameNotice: boolean
+	outputAsHTML: boolean
+	htmlImageWidth: string
+	htmlIncludeAlt: boolean
+	htmlUseCustomPath: boolean
+	htmlCustomPath: string
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -56,6 +63,11 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	handleAllAttachments: false,
 	excludeExtensionPattern: '',
 	disableRenameNotice: false,
+	outputAsHTML: false,
+	htmlImageWidth: '80%',
+	htmlIncludeAlt: false,
+	htmlUseCustomPath: false,
+	htmlCustomPath: '',
 }
 
 const PASTED_IMAGE_PREFIX = 'Pasted image '
@@ -153,8 +165,11 @@ export default class PasteImageRenamePlugin extends Plugin {
 		debugLog('deduplicated newName:', newName)
 		const originName = file.name
 
-		// generate linkText using Obsidian API, linkText is either  ![](filename.png) or ![[filename.png]] according to the "Use [[Wikilinks]]" setting.
-		const linkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
+		const editor = this.getActiveEditor()
+		let cursorLine: number | null = null
+		if (replaceCurrentLine && editor) {
+			cursorLine = editor.getCursor().line
+		}
 
 		// file system operation: rename the file
 		const newPath = path.join(file.parent.path, newName)
@@ -169,32 +184,98 @@ export default class PasteImageRenamePlugin extends Plugin {
 			return
 		}
 
-		// in case fileManager.renameFile may not update the internal link in the active file,
-		// we manually replace the current line by manipulating the editor
+		if (this.settings.outputAsHTML) {
+			if (!editor || cursorLine === null) {
+				new Notice(`Failed to rename ${newName}: no active editor`)
+				return
+			}
 
-		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
-		debugLog('replace text', linkText, newLinkText)
+			const MODIFY_WAIT_TIMEOUT_MS = 300
+			const REPLACE_RETRY_DELAY_MS = 100
 
-		const editor = this.getActiveEditor()
-		if (!editor) {
-			new Notice(`Failed to rename ${newName}: no active editor`)
-			return
+			// Wait for Obsidian to finish updating the internal links in the active file.
+			// We listen for the 'modify' event on the active file, with a timeout fallback.
+			const activeFile = this.getActiveFile()
+			if (!activeFile) {
+				// Edge case: we have an editor (cursorLine), but no active file.
+				// In this case we can't reliably subscribe to the file's modify event,
+				// so just wait briefly for Obsidian to update embeds.
+				await new Promise<void>((resolve) => setTimeout(resolve, MODIFY_WAIT_TIMEOUT_MS))
+			} else {
+				await new Promise<void>((resolve) => {
+					let eventRef: EventRef | null = null
+					const timeoutId = setTimeout(() => {
+						if (eventRef) this.app.vault.offref(eventRef) // Unregister if timeout fires first
+						resolve()
+					}, MODIFY_WAIT_TIMEOUT_MS)
+
+					eventRef = this.app.vault.on('modify', (modifiedFile) => {
+						if (modifiedFile.path === activeFile.path) {
+							clearTimeout(timeoutId)
+							if (eventRef) this.app.vault.offref(eventRef) // Unregister the event
+							// Give the editor a moment to sync with the vault change
+							setTimeout(resolve, 10)
+						}
+					})
+				})
+			}
+
+			// Now read the line - it should have the NEW filename (after Obsidian's update)
+			const lineAfterRename = editor.getLine(cursorLine)
+			debugLog('lineAfterRename:', lineAfterRename)
+
+			// Build a regex to match the NEW filename in the line
+			const flexibleNewName = escapeRegExp(newName).replace(/ /g, '(?: |%20)')
+			const linkPattern = new RegExp(
+				`!\\[\\[[^\\]]*${flexibleNewName}\\]\\]|!\\[[^\\]]*\\]\\([^)]*${flexibleNewName}\\)`,
+				'g'
+			)
+			debugLog('linkPattern:', linkPattern.source)
+
+			const replaceEmbedsInLine = (line: string) =>
+				line.replace(linkPattern, (embed) => {
+					const imagePathFromEmbed = extractObsidianEmbedPath(embed) || ''
+					return createHtmlImgTag(
+						newName,
+						imagePathFromEmbed,
+						file.parent.path,
+						{
+							imageWidth: this.settings.htmlImageWidth,
+							includeAlt: this.settings.htmlIncludeAlt,
+							useCustomPath: this.settings.htmlUseCustomPath,
+							customPath: this.settings.htmlCustomPath,
+						}
+					)
+				})
+
+			// Replace the link with HTML tag, preserving the exact path Obsidian wrote.
+			let lineToProcess = lineAfterRename
+			let replacedLine = replaceEmbedsInLine(lineToProcess)
+			if (replacedLine === lineToProcess) {
+				// Race fallback: give the editor a moment more and retry once.
+				await new Promise<void>((resolve) => setTimeout(resolve, REPLACE_RETRY_DELAY_MS))
+				lineToProcess = editor.getLine(cursorLine)
+				replacedLine = replaceEmbedsInLine(lineToProcess)
+			}
+			if (replacedLine === lineToProcess) {
+				new Notice('Output as HTML: could not find updated image embed to replace (try again)')
+				return
+			}
+			debugLog('replacedLine:', replacedLine)
+
+			// Get current line length again in case it changed
+			const currentLine = editor.getLine(cursorLine)
+			editor.transaction({
+				changes: [
+					{
+						from: { line: cursorLine, ch: 0 },
+						to: { line: cursorLine, ch: currentLine.length },
+						text: replacedLine,
+					}
+				]
+			})
 		}
-
-		const cursor = editor.getCursor()
-		const line = editor.getLine(cursor.line)
-		const replacedLine = line.replace(linkText, newLinkText)
-		debugLog('current line -> replaced line', line, replacedLine)
-		// console.log('editor context', cursor, )
-		editor.transaction({
-			changes: [
-				{
-					from: {...cursor, ch: 0},
-					to: {...cursor, ch: line.length},
-					text: replacedLine,
-				}
-			]
-		})
+		// For non-HTML mode, Obsidian already updated the link - nothing more to do
 
 		if (!this.settings.disableRenameNotice) {
 			new Notice(`Renamed ${originName} to ${newName}`)
@@ -276,7 +357,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 			console.warn('could not get file cache from active file', activeFile.name)
 		}
 
-		const stem = renderTemplate(
+		const stemRaw = renderTemplate(
 			this.settings.imageNamePattern,
 			{
 				imageNameKey,
@@ -285,7 +366,9 @@ export default class PasteImageRenamePlugin extends Plugin {
 				firstHeading,
 			},
 			frontmatter)
-		const meaninglessRegex = new RegExp(`[${this.settings.dupNumberDelimiter}\\s]`, 'gm')
+		// Sanitize invalid characters, trim whitespace, and convert spaces to underscores for cleaner filenames
+		const stem = sanitizer.spaceToUnderscore(sanitizer.filename(stemRaw))
+		const meaninglessRegex = new RegExp(`[${this.settings.dupNumberDelimiter}\\s_]`, 'gm')
 
 		return {
 			stem,
@@ -672,6 +755,64 @@ class SettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.disableRenameNotice)
 				.onChange(async (value) => {
 					this.plugin.settings.disableRenameNotice = value;
+					await this.plugin.saveSettings();
+				}
+			));
+
+		// HTML Output Settings
+		new Setting(containerEl)
+			.setName('Output as HTML')
+			.setDesc('When enabled, renamed images will be inserted as centered HTML image tags instead of markdown links. This integrates with the img2html conversion format.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.outputAsHTML)
+				.onChange(async (value) => {
+					this.plugin.settings.outputAsHTML = value;
+					await this.plugin.saveSettings();
+				}
+			));
+
+		new Setting(containerEl)
+			.setName('HTML image width')
+			.setDesc(`Set the width of images in HTML output. Can be pixels (e.g., 500px), percentage (e.g., 80%), or auto.`)
+			.addText(text => text
+				.setPlaceholder('80%')
+				.setValue(this.plugin.settings.htmlImageWidth)
+				.onChange(async (value) => {
+					this.plugin.settings.htmlImageWidth = value || '80%';
+					await this.plugin.saveSettings();
+				}
+			));
+
+		new Setting(containerEl)
+			.setName('Include alt attribute')
+			.setDesc(`When enabled, HTML image tags will include the alt attribute with the filename for better accessibility and SEO.`)
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.htmlIncludeAlt)
+				.onChange(async (value) => {
+					this.plugin.settings.htmlIncludeAlt = value;
+					await this.plugin.saveSettings();
+				}
+			));
+
+		new Setting(containerEl)
+			.setName('Use custom image path for HTML')
+			.setDesc('When enabled, images will be referenced using a custom path instead of the current file\'s directory. Useful for organizing images in a separate folder like ./assets or images.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.htmlUseCustomPath)
+				.onChange(async (value) => {
+					this.plugin.settings.htmlUseCustomPath = value;
+					await this.plugin.saveSettings();
+				}
+			));
+
+		new Setting(containerEl)
+			.setName('Custom image path')
+			.setDesc('Set the custom image path for HTML src attribute. Supports relative paths (e.g., ./assets, ../images) or absolute paths from vault root. Only used when "Use custom image path for HTML" is enabled.')
+			.addText(text => text
+				.setPlaceholder('./assets')
+				.setValue(this.plugin.settings.htmlCustomPath)
+				.onChange(async (value) => {
+					this.plugin.settings.htmlCustomPath = value;
 					await this.plugin.saveSettings();
 				}
 			));
