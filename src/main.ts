@@ -68,7 +68,7 @@ const PASTED_IMAGE_PREFIX = 'Pasted image '
 export default class PasteImageRenamePlugin extends Plugin {
 	settings: PluginSettings
 	modals: Modal[] = []
-	excludeExtensionRegex: RegExp
+	excludeExtensionRegex: RegExp|null = null
 	pasteCreatedFiles: Set<string> = new Set()
 
 	async onload() {
@@ -383,17 +383,31 @@ export default class PasteImageRenamePlugin extends Plugin {
 	}
 
 	testExcludeExtension(file: TFile): boolean {
-		const pattern = this.settings.excludeExtensionPattern
-		if (!pattern) return false
-		return new RegExp(pattern).test(file.extension)
+		if (!this.excludeExtensionRegex) return false
+		return this.excludeExtensionRegex.test(file.extension)
 	}
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.updateExcludeExtensionRegex()
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	updateExcludeExtensionRegex(pattern?: string) {
+		const pat = pattern ?? this.settings.excludeExtensionPattern
+		if (!pat) {
+			this.excludeExtensionRegex = null
+			return
+		}
+		try {
+			this.excludeExtensionRegex = new RegExp(pat)
+		} catch (err) {
+			console.warn('Invalid excludeExtensionPattern', err)
+			this.excludeExtensionRegex = null
+		}
 	}
 
 	async handleEditorPaste(evt: ClipboardEvent, editor: Editor, info: MarkdownView | MarkdownFileInfo) {
@@ -404,14 +418,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 		const activeFile = info.file
 		if (!activeFile) return
 
-		let excludeExtRegex: RegExp|null = null
-		if (this.settings.excludeExtensionPattern) {
-			try {
-				excludeExtRegex = new RegExp(this.settings.excludeExtensionPattern)
-			} catch (err) {
-				console.warn('Invalid excludeExtensionPattern', err)
-			}
-		}
+		const excludeExtRegex = this.excludeExtensionRegex
 
 		const files = Array.from(clipboardFiles)
 		const handledFiles = files.filter(file => {
@@ -427,8 +434,9 @@ export default class PasteImageRenamePlugin extends Plugin {
 
 		evt.preventDefault()
 
+		let cursor = editor.getCursor()
 		for (const file of handledFiles) {
-			const ext = getClipboardFileExtension(file) || 'png'
+			const ext = getClipboardFileExtension(file) || 'bin'
 			const suggestedName = file.name && file.name.includes('.')
 				? file.name
 				: `${PASTED_IMAGE_PREFIX}${getTimestampForFilename()}.${ext}`
@@ -436,7 +444,9 @@ export default class PasteImageRenamePlugin extends Plugin {
 			this.pasteCreatedFiles.add(targetPath)
 			const createdFile = await this.app.vault.createBinary(targetPath, await file.arrayBuffer())
 			const linkText = this.app.fileManager.generateMarkdownLink(createdFile, activeFile.path)
-			editor.replaceSelection(linkText)
+			editor.replaceRange(linkText, cursor, cursor)
+			cursor = {...cursor, ch: cursor.ch + linkText.length}
+			editor.setCursor(cursor)
 			await this.startRenameProcess(createdFile, this.settings.autoRename)
 		}
 	}
@@ -752,6 +762,7 @@ class SettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.excludeExtensionPattern)
 				.onChange(async (value) => {
 					this.plugin.settings.excludeExtensionPattern = value;
+					this.plugin.updateExcludeExtensionRegex(value);
 					await this.plugin.saveSettings();
 				}
 			));
