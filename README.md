@@ -152,6 +152,9 @@ that match the given extension pattern.
 - **Auto rename**
 
   By default, the rename modal will always be shown to confirm before renaming, if this option is set, the image will be auto renamed after pasting.
+- **Trigger on paste (before other plugins)**
+
+  When enabled, the plugin intercepts the paste event itself, creating the attachment and starting the rename flow immediately after you press Ctrl+V so other plugins can use the renamed output.
 - **Handle all attachments**
 
   By default, the rename modal will always be shown to confirm before renaming, if this option is set, the image will be auto renamed after pasting.

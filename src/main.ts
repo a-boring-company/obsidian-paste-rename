@@ -11,15 +11,17 @@
  */
 import {
   App,
-  HeadingCache,
-  MarkdownView,
-  Modal,
-  Notice,
-  Plugin,
-  PluginSettingTab,
-  Setting,
-  TAbstractFile,
-  TFile,
+   Editor,
+   HeadingCache,
+   MarkdownView,
+   Modal,
+   Notice,
+   Plugin,
+   PluginSettingTab,
+   Setting,
+   MarkdownFileInfo,
+   TAbstractFile,
+   TFile,
 } from 'obsidian';
 
 import { ImageBatchRenameModal } from './batch';
@@ -45,6 +47,7 @@ interface PluginSettings {
 	handleAllAttachments: boolean
 	excludeExtensionPattern: string
 	disableRenameNotice: boolean
+	interceptEditorPaste: boolean
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -56,6 +59,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	handleAllAttachments: false,
 	excludeExtensionPattern: '',
 	disableRenameNotice: false,
+	interceptEditorPaste: false,
 }
 
 const PASTED_IMAGE_PREFIX = 'Pasted image '
@@ -65,6 +69,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 	settings: PluginSettings
 	modals: Modal[] = []
 	excludeExtensionRegex: RegExp
+	pasteCreatedFiles: Set<string> = new Set()
 
 	async onload() {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -73,10 +78,20 @@ export default class PasteImageRenamePlugin extends Plugin {
 		await this.loadSettings();
 
 		this.registerEvent(
+			this.app.workspace.on('editor-paste', (evt, editor, info) => {
+				this.handleEditorPaste(evt, editor, info)
+			})
+		)
+
+		this.registerEvent(
 			this.app.vault.on('create', (file) => {
 				// debugLog('file created', file)
 				if (!(file instanceof TFile))
 					return
+				if (this.pasteCreatedFiles.has(file.path)) {
+					this.pasteCreatedFiles.delete(file.path)
+					return
+				}
 				const timeGapMs = (new Date().getTime()) - file.stat.ctime
 				// if the file is created more than 1 second ago, the event is most likely be fired on vault initialization when starting Obsidian app, ignore it
 				if (timeGapMs > 1000)
@@ -380,6 +395,48 @@ export default class PasteImageRenamePlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+
+	async handleEditorPaste(evt: ClipboardEvent, editor: Editor, info: MarkdownView | MarkdownFileInfo) {
+		if (!this.settings.interceptEditorPaste) return
+		const clipboardFiles = evt.clipboardData?.files
+		if (!clipboardFiles || clipboardFiles.length === 0) return
+
+		const activeFile = info instanceof MarkdownView ? info.file : info.file
+		if (!activeFile) return
+
+		const files = Array.from(clipboardFiles)
+		const handledFiles = files.filter(file => {
+			const ext = getClipboardFileExtension(file)
+			if (!ext) return false
+			if (this.settings.handleAllAttachments) {
+				if (this.settings.excludeExtensionPattern) {
+					try {
+						if (new RegExp(this.settings.excludeExtensionPattern).test(ext)) return false
+					} catch (err) {
+						console.warn('Invalid excludeExtensionPattern', err)
+					}
+				}
+				return true
+			}
+			return isImageExtension(ext) || file.type.startsWith('image/')
+		})
+		if (!handledFiles.length) return
+
+		evt.preventDefault()
+
+		for (const file of handledFiles) {
+			const ext = getClipboardFileExtension(file) || 'png'
+			const suggestedName = file.name && file.name.includes('.')
+				? file.name
+				: `${PASTED_IMAGE_PREFIX}${getTimestampForFilename()}.${ext}`
+			const targetPath = await this.app.fileManager.getAvailablePathForAttachment(suggestedName, activeFile.path)
+			this.pasteCreatedFiles.add(targetPath)
+			const createdFile = await this.app.vault.createBinary(targetPath, await file.arrayBuffer())
+			const linkText = this.app.fileManager.generateMarkdownLink(createdFile, activeFile.path)
+			editor.replaceSelection(linkText)
+			await this.startRenameProcess(createdFile, this.settings.autoRename)
+		}
+	}
 }
 
 function getFirstHeading(headings?: HeadingCache[]) {
@@ -417,11 +474,33 @@ const IMAGE_EXTS = [
 
 function isImage(file: TAbstractFile): boolean {
 	if (file instanceof TFile) {
-		if (IMAGE_EXTS.contains(file.extension.toLowerCase())) {
+		if (isImageExtension(file.extension)) {
 			return true
 		}
 	}
 	return false
+}
+
+function isImageExtension(ext: string) {
+	return IMAGE_EXTS.includes(ext.toLowerCase())
+}
+
+function getClipboardFileExtension(file: File): string {
+	const name = file.name || ''
+	if (name.includes('.')) {
+		return name.split('.').pop().toLowerCase()
+	}
+	const typePart = file.type?.split('/')[1]
+	if (typePart) {
+		return typePart.replace(/\+.+$/, '').toLowerCase()
+	}
+	return ''
+}
+
+function getTimestampForFilename() {
+	const pad = (n: number) => n.toString().padStart(2, '0')
+	const d = new Date()
+	return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 }
 
 class ImageRenameModal extends Modal {
@@ -636,6 +715,17 @@ class SettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}
 			));
+
+		new Setting(containerEl)
+			.setName('Trigger on paste (before other plugins)')
+			.setDesc('Handle pasted attachments immediately after pressing Ctrl+V so other plugins receive the renamed output.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.interceptEditorPaste)
+				.onChange(async (value) => {
+					this.plugin.settings.interceptEditorPaste = value;
+					await this.plugin.saveSettings();
+				}
+				))
 
 		new Setting(containerEl)
 			.setName('Handle all attachments')
