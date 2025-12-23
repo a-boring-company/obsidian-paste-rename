@@ -477,7 +477,7 @@ const IMAGE_EXTS = [
 
 function isImage(file: TAbstractFile): boolean {
 	if (file instanceof TFile) {
-		if (isImageExtension(file.extension.toLowerCase())) {
+		if (isImageExtension(file.extension)) {
 			return true
 		}
 	}
