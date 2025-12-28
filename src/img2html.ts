@@ -4,7 +4,7 @@
  * Extracted from obsidian-img2html plugin
  */
 
-import { escapeRegExp } from './utils'
+import { debugLog, escapeRegExp } from './utils'
 
 export interface Html2ImgConfig {
 	imageWidth: string
@@ -13,17 +13,17 @@ export interface Html2ImgConfig {
 	customPath: string
 }
 
-function buildImgWidthAttrs(widthRaw: string): { widthAttr: string; styleAttr: string } {
+function buildImgWidthStyleAttr(widthRaw: string): string {
 	const width = (widthRaw ?? '').trim()
-	if (!width) return { widthAttr: '', styleAttr: '' }
+	if (!width) return ''
 	// Always use style attribute for modern HTML output consistency.
 	// Normalize bare numbers to pixel widths.
 	const styleWidth = /^\d+$/.test(width) ? `${width}px` : width
 	// Validate the width to prevent CSS injection before using it in a style attribute.
 	if (/^(auto|(?:\d*\.?\d+)(?:px|%|em|rem|vw|vh))$/.test(styleWidth)) {
-		return { widthAttr: '', styleAttr: ` style="width: ${escapeHtml(styleWidth)};"` }
+		return ` style="width: ${escapeHtml(styleWidth)};"`
 	}
-	return { widthAttr: '', styleAttr: '' }
+	return ''
 }
 
 function escapeHtml(text: string): string {
@@ -79,12 +79,11 @@ export function createHtmlImgTag(
 
 	// Build alt attribute
 	const altAttr = includeAlt ? ` alt="${escapeHtml(fileName)}"` : ''
-
-	const { widthAttr, styleAttr } = buildImgWidthAttrs(imageWidth)
+	const styleAttr = buildImgWidthStyleAttr(imageWidth)
 
 	// Generate HTML with centered layout
 	const html = `<figure style="text-align: center;">
-<img src="${src}"${widthAttr}${styleAttr}${altAttr}>
+<img src="${src}"${styleAttr}${altAttr}>
 <figcaption><b>Figure</b>. ${figureCaption}</figcaption>
 </figure>`
 
@@ -168,7 +167,7 @@ export function replaceImageEmbedsWithHtml(
 					basenameMatches = decodeURIComponent(basename) === matchFileName
 				} catch (e) {
 					// ignore decode errors, but log them for debugging
-					console.warn(`Failed to decode URI component in embed path: ${basename}`, e);
+					debugLog('Failed to decode URI component in embed path:', basename, e)
 				}
 			}
 			if (basenameMatches) {
