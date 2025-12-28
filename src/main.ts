@@ -187,7 +187,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 
 		if (this.settings.outputAsHTML) {
 			if (!editor || cursorLine === null) {
-				new Notice(`Failed to rename ${newName}: no active editor`)
+				new Notice(`Failed to replace markdown with HTML for ${newName}: no active editor`)
 				return
 			}
 			await this.handleHtmlOutput(file, newName, originName, editor, cursorLine)
@@ -249,15 +249,12 @@ export default class PasteImageRenamePlugin extends Plugin {
 		debugLog('lineAfterRename:', lineAfterRename)
 
 		const lineCount = editor.lineCount()
-		const candidateLines: number[] = []
-		for (let delta = 0; delta <= LINE_SCAN_RADIUS; delta++) {
+		const candidateLines: number[] = [cursorLine]
+		for (let delta = 1; delta <= LINE_SCAN_RADIUS; delta++) {
 			const before = cursorLine - delta
-			const after = cursorLine + delta
-			if (delta === 0) {
-				candidateLines.push(cursorLine)
-				continue
-			}
 			if (before >= 0) candidateLines.push(before)
+
+			const after = cursorLine + delta
 			if (after < lineCount) candidateLines.push(after)
 		}
 

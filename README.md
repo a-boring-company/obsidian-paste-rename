@@ -140,7 +140,7 @@ that match the given extension pattern.
   - Examples
 
     Here are some examples from pattern to image names (repeat in sequence), variables: `fileName = "My note", imageNameKey = "foo"`:
-    - `{{fileName}}`: My note, My note-1, My note-2
+    - `{{fileName}}`: My_note, My_note-1, My_note-2
     - `{{imageNameKey}}`: foo, foo-1, foo-2
     - `{{imageNameKey}}-{{DATE:YYYYMMDD}}`: foo-20220408, foo-20220408-1, foo-20220408-2
 - **Duplicate number at start (or end)**
@@ -166,7 +166,7 @@ that match the given extension pattern.
 	Note that Obsidian may display a notice when a link has changed, this option cannot disable that.
 - **Output as HTML** *(New)*
 
-  When enabled, renamed images will be inserted as centered HTML image tags instead of markdown links. This integrates with the img2html plugin format. The HTML output includes:
+  When enabled, renamed images will be inserted as centered HTML image tags instead of markdown links. This follows the same HTML structure used by the community “img2html” Obsidian plugin (which converts Markdown image links to HTML). The HTML output includes:
   - Centered layout with CSS styling
   - Automatic figure caption generated from image filename (underscores replaced with spaces)
   - Configurable image width
