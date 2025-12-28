@@ -249,7 +249,7 @@ describe('createHtmlImgTag', () => {
 			'evil.png',
 			'',
 			{
-				imageWidth: '80%" onload="hack',
+				imageWidth: '100%; position: fixed; top: 0; left: 0;',
 				includeAlt: true,
 				useCustomPath: true,
 				customPath: '<script>alert(1)</script>',
@@ -257,10 +257,29 @@ describe('createHtmlImgTag', () => {
 		);
 
 		expect(result).toContain('src="&lt;script&gt;alert(1)&lt;/script&gt;/&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"')
-		expect(result).toContain('style="width: 80%&quot; onload=&quot;hack;"')
+		// Width is validated now; unsafe CSS should be dropped entirely.
+		expect(result).not.toContain('style="width:')
+		expect(result).not.toContain('position: fixed')
 		expect(result).toContain('alt="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"')
 		expect(result).toContain('<figcaption><b>Figure</b>. &quot;&gt;&lt;img src=x onerror=alert(1)&gt;.')
 	});
+
+	it('should use width attribute for integer widths', () => {
+		const result = createHtmlImgTag(
+			'plot.png',
+			'plot.png',
+			'',
+			{
+				imageWidth: '500',
+				includeAlt: false,
+				useCustomPath: false,
+				customPath: '',
+			}
+		)
+
+		expect(result).toContain('<img src="plot.png" width="500">')
+		expect(result).not.toContain('style="width:')
+	})
 
 	it('should handle filenames with spaces (real-world Obsidian rename)', () => {
 		const result = createHtmlImgTag(

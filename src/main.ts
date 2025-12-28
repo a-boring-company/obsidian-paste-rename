@@ -277,7 +277,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 
 		// Replace the embed with HTML, retrying a few times in case editor/link updates lag.
 		let found: { line: number; replacedLine: string } | null = null
-		for (let attempt = 0; attempt < MAX_REPLACE_ATTEMPTS && !found; attempt++) {
+		for (let attempt = 0; attempt < MAX_REPLACE_ATTEMPTS; attempt++) {
 			found = tryReplace()
 			if (found) break
 			await new Promise<void>((resolve) => setTimeout(resolve, REPLACE_RETRY_DELAY_MS))

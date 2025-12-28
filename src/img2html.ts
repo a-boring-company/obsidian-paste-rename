@@ -21,7 +21,11 @@ function buildImgWidthAttrs(widthRaw: string): { widthAttr: string; styleAttr: s
 	if (/^\d+$/.test(width)) {
 		return { widthAttr: ` width="${escapeHtml(width)}"`, styleAttr: '' }
 	}
-	return { widthAttr: '', styleAttr: ` style="width: ${escapeHtml(width)};"` }
+	// Validate the width to prevent CSS injection before using it in a style attribute.
+	if (/^(auto|(?:\d*\.?\d+)(?:px|%|em|rem|vw|vh))$/.test(width)) {
+		return { widthAttr: '', styleAttr: ` style="width: ${escapeHtml(width)};"` }
+	}
+	return { widthAttr: '', styleAttr: '' }
 }
 
 function escapeHtml(text: string): string {
