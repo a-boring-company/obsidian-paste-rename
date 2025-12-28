@@ -24,7 +24,7 @@ describe('imageNameToFigureCaption', () => {
 	});
 
 	it('should handle filename with only extension', () => {
-		expect(imageNameToFigureCaption('.png')).toBe('.');
+		expect(imageNameToFigureCaption('.png')).toBe('.png.')
 	});
 
 	it('should preserve spaces in filenames', () => {
@@ -58,11 +58,10 @@ describe('createHtmlImgTag', () => {
 			}
 		);
 
-		expect(result).toContain('<div style="text-align: center;">');
-		expect(result).toContain('</div>');
+		expect(result).toContain('<figure style="text-align: center;">');
+		expect(result).toContain('</figure>');
 		expect(result).toContain('<img src="image_1234567890.png" style="width: 80%;">');
-		expect(result).toContain('<br>');
-		expect(result).toContain('<b>Figure</b>');
+		expect(result).toContain('<figcaption><b>Figure</b>.');
 		expect(result).toContain('image 1234567890.');
 	});
 
@@ -79,10 +78,10 @@ describe('createHtmlImgTag', () => {
 			}
 		);
 
-		expect(result).toContain('<div style="text-align: center;">');
-		expect(result).toContain('</div>');
+		expect(result).toContain('<figure style="text-align: center;">');
+		expect(result).toContain('</figure>');
 		expect(result).toContain('<img src="assets/image_1234567890.png" style="width: 80%;">');
-		expect(result).toContain('<b>Figure</b>');
+		expect(result).toContain('<figcaption><b>Figure</b>.');
 		expect(result).toContain('image 1234567890.');
 	});
 
@@ -100,7 +99,7 @@ describe('createHtmlImgTag', () => {
 		);
 
 		expect(result).toContain('<img src="./assets/image_1234567890.png" style="width: 80%;">');
-		expect(result).toContain('<b>Figure</b>');
+		expect(result).toContain('<figcaption><b>Figure</b>.');
 		expect(result).toContain('image 1234567890.');
 	});
 
@@ -135,7 +134,7 @@ describe('createHtmlImgTag', () => {
 			}
 		);
 
-		expect(result).toContain('<b>Figure</b>');
+		expect(result).toContain('<figcaption><b>Figure</b>.');
 		expect(result).toContain('my test image 123.');
 	});
 
@@ -216,11 +215,10 @@ describe('createHtmlImgTag', () => {
 			}
 		);
 
-		const expectedFormat = `<div style="text-align: center;">
+		const expectedFormat = `<figure style="text-align: center;">
 <img src="image_1234567890.png" style="width: 80%;">
-<br>
-<b>Figure</b>. image 1234567890.
-</div>`;
+<figcaption><b>Figure</b>. image 1234567890.</figcaption>
+</figure>`;
 
 		expect(result).toBe(expectedFormat);
 	});
@@ -238,7 +236,7 @@ describe('createHtmlImgTag', () => {
 			}
 		);
 
-		expect(result).toContain('<div style="text-align: center;">');
+		expect(result).toContain('<figure style="text-align: center;">');
 		expect(result).toContain('style="width: 600px;"');
 		expect(result).toContain('alt="my_screenshot_2024.jpg"');
 		expect(result).toContain('src="./images/my_screenshot_2024.jpg"');
@@ -261,7 +259,7 @@ describe('createHtmlImgTag', () => {
 		expect(result).toContain('src="&lt;script&gt;alert(1)&lt;/script&gt;/&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"')
 		expect(result).toContain('style="width: 80%&quot; onload=&quot;hack;"')
 		expect(result).toContain('alt="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"')
-		expect(result).toContain('Figure</b>. &quot;&gt;&lt;img src=x onerror=alert(1)&gt;.')
+		expect(result).toContain('<figcaption><b>Figure</b>. &quot;&gt;&lt;img src=x onerror=alert(1)&gt;.')
 	});
 
 	it('should handle filenames with spaces (real-world Obsidian rename)', () => {
@@ -278,7 +276,7 @@ describe('createHtmlImgTag', () => {
 		);
 
 		expect(result).toContain('src="appx/2021 - Compaleo - Spectral Domain Sparse Representation -12.png"');
-		expect(result).toContain('<b>Figure</b>. 2021 - Compaleo - Spectral Domain Sparse Representation -12.');
+		expect(result).toContain('<figcaption><b>Figure</b>. 2021 - Compaleo - Spectral Domain Sparse Representation -12.');
 	});
 
 	it('should use imageDir when imagePath is empty', () => {

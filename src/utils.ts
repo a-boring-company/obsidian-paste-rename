@@ -79,7 +79,7 @@ export const sanitizer = {
 
 	// Convert spaces to underscores for cleaner filenames
 	spaceToUnderscore(s: string): string {
-		return s.trim().replace(/ /g, '_')
+		return s.trim().replace(/\s+/g, '_')
 	},
 
 	delimiter(s: string): string {

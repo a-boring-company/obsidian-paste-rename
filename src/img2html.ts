@@ -79,11 +79,10 @@ export function createHtmlImgTag(
 	const { widthAttr, styleAttr } = buildImgWidthAttrs(imageWidth)
 
 	// Generate HTML with centered layout
-	const html = `<div style="text-align: center;">
+	const html = `<figure style="text-align: center;">
 <img src="${src}"${widthAttr}${styleAttr}${altAttr}>
-<br>
-<b>Figure</b>. ${figureCaption}
-</div>`
+<figcaption><b>Figure</b>. ${figureCaption}</figcaption>
+</figure>`
 
 	return html
 }
@@ -96,7 +95,7 @@ export function createHtmlImgTag(
  */
 export function imageNameToFigureCaption(fileName: string): string {
 	// Remove extension
-	const nameWithoutExt = fileName.replace(/\.[^/.]+$/, '')
+	const nameWithoutExt = fileName.replace(/(?<!^)\.[^/.]+$/, '')
 	// Replace underscores with spaces
 	const caption = nameWithoutExt.replace(/_/g, ' ')
 	// Add period at the end

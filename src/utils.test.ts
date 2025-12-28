@@ -175,7 +175,7 @@ describe('sanitizer.spaceToUnderscore', () => {
 	});
 
 	it('should handle consecutive spaces', () => {
-		expect(sanitizer.spaceToUnderscore('my  file')).toBe('my__file');
+		expect(sanitizer.spaceToUnderscore('my  file')).toBe('my_file');
 	});
 
 	it('should handle leading and trailing spaces', () => {
