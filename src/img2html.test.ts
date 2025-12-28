@@ -256,12 +256,12 @@ describe('createHtmlImgTag', () => {
 			}
 		);
 
-		expect(result).toContain('src="&lt;script&gt;alert(1)&lt;/script&gt;/&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"')
+		expect(result).toContain('src="&lt;script&gt;alert(1)&lt;/script&gt;/&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"');
 		// Width is validated now; unsafe CSS should be dropped entirely.
-		expect(result).not.toContain('style="width:')
-		expect(result).not.toContain('position: fixed')
-		expect(result).toContain('alt="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"')
-		expect(result).toContain('<figcaption><b>Figure</b>. &quot;&gt;&lt;img src=x onerror=alert(1)&gt;.')
+		expect(result).not.toContain('style="width:');
+		expect(result).not.toContain('position: fixed');
+		expect(result).toContain('alt="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.png"');
+		expect(result).toContain('<figcaption><b>Figure</b>. &quot;&gt;&lt;img src=x onerror=alert(1)&gt;.');
 	});
 
 	it('should use width attribute for integer widths', () => {
@@ -275,11 +275,11 @@ describe('createHtmlImgTag', () => {
 				useCustomPath: false,
 				customPath: '',
 			}
-		)
+		);
 
-		expect(result).toContain('<img src="plot.png" width="500">')
-		expect(result).not.toContain('style="width:')
-	})
+		expect(result).toContain('<img src="plot.png" width="500">');
+		expect(result).not.toContain('style="width:');
+	});
 
 	it('should handle filenames with spaces (real-world Obsidian rename)', () => {
 		const result = createHtmlImgTag(
