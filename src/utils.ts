@@ -64,9 +64,14 @@ export const path = {
 	},
 
 	// return extension without dot, e.g. 'jpg'
+	// returns empty string for files without extensions or hidden files (e.g., '.gitignore')
 	extension(fullpath: string): string {
-		const positions = [...fullpath.matchAll(new RegExp('\\.', 'gi'))].map(a => a.index)
-		return fullpath.slice(positions[positions.length - 1] + 1)
+		const basename = this.basename(fullpath)
+		const lastDot = basename.lastIndexOf('.')
+		if (lastDot < 1) { // No dot or dot is the first character (hidden file)
+			return ''
+		}
+		return basename.slice(lastDot + 1)
 	},
 }
 

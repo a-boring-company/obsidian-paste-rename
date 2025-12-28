@@ -11,6 +11,10 @@ export interface Html2ImgConfig {
 	customPath: string
 }
 
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function buildImgWidthAttrs(widthRaw: string): { widthAttr: string; styleAttr: string } {
 	const width = (widthRaw ?? '').trim()
 	if (!width) return { widthAttr: '', styleAttr: '' }
@@ -130,4 +134,32 @@ export function extractObsidianEmbedPath(embed: string): string | null {
 	}
 
 	return null
+}
+
+/**
+ * Replace Obsidian image embeds in a line with centered HTML <figure> output.
+ *
+ * This is intentionally a pure string transform so it can be unit-tested.
+ */
+export function replaceImageEmbedsWithHtml(
+	line: string,
+	fileName: string,
+	imageDir: string,
+	config: Html2ImgConfig
+): { replacedLine: string; didReplace: boolean } {
+	const flexibleFileName = escapeRegExp(fileName).replace(/ /g, '(?: |%20)')
+	const embedPattern = new RegExp(
+		`!\\[\\[[^\\]]*${flexibleFileName}[^\\]]*\\]\\]|!\\[[^\\]]*\\]\\([^)]*${flexibleFileName}[^)]*\\)`,
+		'g'
+	)
+
+	const replacedLine = line.replace(embedPattern, (embed) => {
+		const imagePathFromEmbed = extractObsidianEmbedPath(embed) || ''
+		return createHtmlImgTag(fileName, imagePathFromEmbed, imageDir, config)
+	})
+
+	return {
+		replacedLine,
+		didReplace: replacedLine !== line,
+	}
 }

@@ -74,7 +74,7 @@ describe('path.extension', () => {
 	});
 
 	it('should handle files with no extension', () => {
-		expect(path.extension('README')).toBe('README');
+		expect(path.extension('README')).toBe('');
 	});
 
 	it('should handle paths with folders', () => {
@@ -82,7 +82,7 @@ describe('path.extension', () => {
 	});
 
 	it('should handle hidden files', () => {
-		expect(path.extension('.gitignore')).toBe('gitignore');
+		expect(path.extension('.gitignore')).toBe('');
 	});
 });
 

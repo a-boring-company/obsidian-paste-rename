@@ -1,4 +1,4 @@
-import { createHtmlImgTag, extractObsidianEmbedPath, imageNameToFigureCaption } from './img2html';
+import { createHtmlImgTag, extractObsidianEmbedPath, imageNameToFigureCaption, replaceImageEmbedsWithHtml } from './img2html';
 
 describe('imageNameToFigureCaption', () => {
 	it('should replace underscores with spaces', () => {
@@ -396,6 +396,60 @@ describe('createHtmlImgTag', () => {
 		expect(result).not.toContain('original/path');
 	});
 });
+
+describe('replaceImageEmbedsWithHtml', () => {
+	const config = {
+		imageWidth: '80%',
+		includeAlt: false,
+		useCustomPath: false,
+		customPath: '',
+	}
+
+	it('should replace a wikilink embed (spaces)', () => {
+		const line = 'prefix ![[foo bar.png]] suffix'
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		expect(result.didReplace).toBe(true)
+		expect(result.replacedLine).toContain('prefix ')
+		expect(result.replacedLine).toContain(' suffix')
+		expect(result.replacedLine).toContain('<img src="foo bar.png"')
+	})
+
+	it('should replace a wikilink embed with pipe suffix', () => {
+		const line = '![[foo bar.png|300]]'
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		expect(result.didReplace).toBe(true)
+		expect(result.replacedLine).toContain('<img src=\"foo bar.png\"')
+	})
+
+	it('should replace a wikilink embed (%20)', () => {
+		const line = '![[foo%20bar.png]]'
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		expect(result.didReplace).toBe(true)
+		// Preserve the exact path extracted from the embed
+		expect(result.replacedLine).toContain('<img src="foo%20bar.png"')
+	})
+
+	it('should replace a markdown embed with spaces', () => {
+		const line = '![alt](foo bar.png)'
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		expect(result.didReplace).toBe(true)
+		expect(result.replacedLine).toContain('<img src="foo bar.png"')
+	})
+
+	it('should replace a markdown embed with angle brackets', () => {
+		const line = '![alt](<foo bar.png>)'
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		expect(result.didReplace).toBe(true)
+		expect(result.replacedLine).toContain('<img src="foo bar.png"')
+	})
+
+	it('should not replace when the target filename is not present', () => {
+		const line = '![[other.png]]'
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		expect(result.didReplace).toBe(false)
+		expect(result.replacedLine).toBe(line)
+	})
+})
 
 describe('extractObsidianEmbedPath', () => {
 	it('should extract path from wikilink embed', () => {

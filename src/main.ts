@@ -11,6 +11,7 @@
  */
 import {
   App,
+  Editor,
   EventRef,
   HeadingCache,
   MarkdownView,
@@ -29,13 +30,13 @@ import {
   createElementTree,
   DEBUG,
   debugLog,
-  escapeRegExp,
+	escapeRegExp,
   lockInputMethodComposition,
   NameObj,
   path,
   sanitizer,
 } from './utils';
-import { createHtmlImgTag, extractObsidianEmbedPath } from './img2html';
+import { replaceImageEmbedsWithHtml } from './img2html';
 
 interface PluginSettings {
 	// {{imageNameKey}}-{{DATE:YYYYMMDD}}
@@ -189,97 +190,97 @@ export default class PasteImageRenamePlugin extends Plugin {
 				new Notice(`Failed to rename ${newName}: no active editor`)
 				return
 			}
-
-			const MODIFY_WAIT_TIMEOUT_MS = 300
-			const REPLACE_RETRY_DELAY_MS = 100
-
-			// Wait for Obsidian to finish updating the internal links in the active file.
-			// We listen for the 'modify' event on the active file, with a timeout fallback.
-			const activeFile = this.getActiveFile()
-			if (!activeFile) {
-				// Edge case: we have an editor (cursorLine), but no active file.
-				// In this case we can't reliably subscribe to the file's modify event,
-				// so just wait briefly for Obsidian to update embeds.
-				await new Promise<void>((resolve) => setTimeout(resolve, MODIFY_WAIT_TIMEOUT_MS))
-			} else {
-				await new Promise<void>((resolve) => {
-					let eventRef: EventRef | null = null
-					const timeoutId = setTimeout(() => {
-						if (eventRef) this.app.vault.offref(eventRef) // Unregister if timeout fires first
-						resolve()
-					}, MODIFY_WAIT_TIMEOUT_MS)
-
-					eventRef = this.app.vault.on('modify', (modifiedFile) => {
-						if (modifiedFile.path === activeFile.path) {
-							clearTimeout(timeoutId)
-							if (eventRef) this.app.vault.offref(eventRef) // Unregister the event
-							// Give the editor a moment to sync with the vault change
-							setTimeout(resolve, 10)
-						}
-					})
-				})
-			}
-
-			// Now read the line - it should have the NEW filename (after Obsidian's update)
-			const lineAfterRename = editor.getLine(cursorLine)
-			debugLog('lineAfterRename:', lineAfterRename)
-
-			// Build a regex to match the NEW filename in the line
-			const flexibleNewName = escapeRegExp(newName).replace(/ /g, '(?: |%20)')
-			const linkPattern = new RegExp(
-				`!\\[\\[[^\\]]*${flexibleNewName}\\]\\]|!\\[[^\\]]*\\]\\([^)]*${flexibleNewName}\\)`,
-				'g'
-			)
-			debugLog('linkPattern:', linkPattern.source)
-
-			const replaceEmbedsInLine = (line: string) =>
-				line.replace(linkPattern, (embed) => {
-					const imagePathFromEmbed = extractObsidianEmbedPath(embed) || ''
-					return createHtmlImgTag(
-						newName,
-						imagePathFromEmbed,
-						file.parent.path,
-						{
-							imageWidth: this.settings.htmlImageWidth,
-							includeAlt: this.settings.htmlIncludeAlt,
-							useCustomPath: this.settings.htmlUseCustomPath,
-							customPath: this.settings.htmlCustomPath,
-						}
-					)
-				})
-
-			// Replace the link with HTML tag, preserving the exact path Obsidian wrote.
-			let lineToProcess = lineAfterRename
-			let replacedLine = replaceEmbedsInLine(lineToProcess)
-			if (replacedLine === lineToProcess) {
-				// Race fallback: give the editor a moment more and retry once.
-				await new Promise<void>((resolve) => setTimeout(resolve, REPLACE_RETRY_DELAY_MS))
-				lineToProcess = editor.getLine(cursorLine)
-				replacedLine = replaceEmbedsInLine(lineToProcess)
-			}
-			if (replacedLine === lineToProcess) {
-				new Notice('Output as HTML: could not find updated image embed to replace (try again)')
-				return
-			}
-			debugLog('replacedLine:', replacedLine)
-
-			// Get current line length again in case it changed
-			const currentLine = editor.getLine(cursorLine)
-			editor.transaction({
-				changes: [
-					{
-						from: { line: cursorLine, ch: 0 },
-						to: { line: cursorLine, ch: currentLine.length },
-						text: replacedLine,
-					}
-				]
-			})
+			await this.handleHtmlOutput(file, newName, editor, cursorLine)
 		}
 		// For non-HTML mode, Obsidian already updated the link - nothing more to do
 
 		if (!this.settings.disableRenameNotice) {
 			new Notice(`Renamed ${originName} to ${newName}`)
 		}
+	}
+
+	/**
+	 * Handles HTML output conversion after a file rename.
+	 * Waits for Obsidian to update internal links, then replaces the embed with an HTML img tag.
+	 */
+	private async handleHtmlOutput(file: TFile, newName: string, editor: Editor, cursorLine: number): Promise<void> {
+		const MODIFY_WAIT_TIMEOUT_MS = 300
+		const REPLACE_RETRY_DELAY_MS = 100
+
+		// Wait for Obsidian to finish updating the internal links in the active file.
+		// We listen for the 'modify' event on the active file, with a timeout fallback.
+		const activeFile = this.getActiveFile()
+		if (!activeFile) {
+			// Edge case: we have an editor (cursorLine), but no active file.
+			// In this case we can't reliably subscribe to the file's modify event,
+			// so just wait briefly for Obsidian to update embeds.
+			await new Promise<void>((resolve) => setTimeout(resolve, MODIFY_WAIT_TIMEOUT_MS))
+		} else {
+			await new Promise<void>((resolve) => {
+				let eventRef: EventRef | null = null
+				const timeoutId = setTimeout(() => {
+					if (eventRef) this.app.vault.offref(eventRef) // Unregister if timeout fires first
+					resolve()
+				}, MODIFY_WAIT_TIMEOUT_MS)
+
+				eventRef = this.app.vault.on('modify', (modifiedFile) => {
+					if (modifiedFile.path === activeFile.path) {
+						clearTimeout(timeoutId)
+						if (eventRef) this.app.vault.offref(eventRef) // Unregister the event
+						// Give the editor a moment to sync with the vault change
+						setTimeout(resolve, 10)
+					}
+				})
+			})
+		}
+
+		const config = {
+			imageWidth: this.settings.htmlImageWidth,
+			includeAlt: this.settings.htmlIncludeAlt,
+			useCustomPath: this.settings.htmlUseCustomPath,
+			customPath: this.settings.htmlCustomPath,
+		}
+
+		// Now read the line - it should have the NEW filename (after Obsidian's update)
+		const lineAfterRename = editor.getLine(cursorLine)
+		debugLog('lineAfterRename:', lineAfterRename)
+
+		const { replacedLine: replacedLine0, didReplace: didReplace0 } = replaceImageEmbedsWithHtml(
+			lineAfterRename,
+			newName,
+			file.parent.path,
+			config
+		)
+
+		// Replace the link with HTML tag, preserving the exact path Obsidian wrote.
+		let lineToProcess = lineAfterRename
+		let replacedLine = replacedLine0
+		let didReplace = didReplace0
+		if (!didReplace) {
+			// Race fallback: give the editor a moment more and retry once.
+			await new Promise<void>((resolve) => setTimeout(resolve, REPLACE_RETRY_DELAY_MS))
+			lineToProcess = editor.getLine(cursorLine)
+			const retry = replaceImageEmbedsWithHtml(lineToProcess, newName, file.parent.path, config)
+			replacedLine = retry.replacedLine
+			didReplace = retry.didReplace
+		}
+		if (!didReplace) {
+			new Notice('Output as HTML: could not find updated image embed to replace (try again)')
+			return
+		}
+		debugLog('replacedLine:', replacedLine)
+
+		// Get current line length again in case it changed
+		const currentLine = editor.getLine(cursorLine)
+		editor.transaction({
+			changes: [
+				{
+					from: { line: cursorLine, ch: 0 },
+					to: { line: cursorLine, ch: currentLine.length },
+					text: replacedLine,
+				}
+			]
+		})
 	}
 
 	openRenameModal(file: TFile, newName: string, sourcePath: string) {
