@@ -190,7 +190,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 				new Notice(`Failed to rename ${newName}: no active editor`)
 				return
 			}
-			await this.handleHtmlOutput(file, newName, editor, cursorLine)
+			await this.handleHtmlOutput(file, newName, originName, editor, cursorLine)
 		}
 		// For non-HTML mode, Obsidian already updated the link - nothing more to do
 
@@ -203,9 +203,12 @@ export default class PasteImageRenamePlugin extends Plugin {
 	 * Handles HTML output conversion after a file rename.
 	 * Waits for Obsidian to update internal links, then replaces the embed with an HTML img tag.
 	 */
-	private async handleHtmlOutput(file: TFile, newName: string, editor: Editor, cursorLine: number): Promise<void> {
+	private async handleHtmlOutput(file: TFile, newName: string, originName: string, editor: Editor, cursorLine: number): Promise<void> {
 		const MODIFY_WAIT_TIMEOUT_MS = 300
+		const EDITOR_SYNC_DELAY_MS = 10
 		const REPLACE_RETRY_DELAY_MS = 100
+		const MAX_REPLACE_ATTEMPTS = 5
+		const LINE_SCAN_RADIUS = 2
 
 		// Wait for Obsidian to finish updating the internal links in the active file.
 		// We listen for the 'modify' event on the active file, with a timeout fallback.
@@ -228,7 +231,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 						clearTimeout(timeoutId)
 						if (eventRef) this.app.vault.offref(eventRef) // Unregister the event
 						// Give the editor a moment to sync with the vault change
-						setTimeout(resolve, 10)
+						setTimeout(resolve, EDITOR_SYNC_DELAY_MS)
 					}
 				})
 			})
@@ -245,39 +248,54 @@ export default class PasteImageRenamePlugin extends Plugin {
 		const lineAfterRename = editor.getLine(cursorLine)
 		debugLog('lineAfterRename:', lineAfterRename)
 
-		const { replacedLine: replacedLine0, didReplace: didReplace0 } = replaceImageEmbedsWithHtml(
-			lineAfterRename,
-			newName,
-			file.parent.path,
-			config
-		)
-
-		// Replace the link with HTML tag, preserving the exact path Obsidian wrote.
-		let lineToProcess = lineAfterRename
-		let replacedLine = replacedLine0
-		let didReplace = didReplace0
-		if (!didReplace) {
-			// Race fallback: give the editor a moment more and retry once.
-			await new Promise<void>((resolve) => setTimeout(resolve, REPLACE_RETRY_DELAY_MS))
-			lineToProcess = editor.getLine(cursorLine)
-			const retry = replaceImageEmbedsWithHtml(lineToProcess, newName, file.parent.path, config)
-			replacedLine = retry.replacedLine
-			didReplace = retry.didReplace
+		const lineCount = editor.lineCount()
+		const candidateLines: number[] = []
+		for (let delta = 0; delta <= LINE_SCAN_RADIUS; delta++) {
+			const before = cursorLine - delta
+			const after = cursorLine + delta
+			if (delta === 0) {
+				candidateLines.push(cursorLine)
+				continue
+			}
+			if (before >= 0) candidateLines.push(before)
+			if (after < lineCount) candidateLines.push(after)
 		}
-		if (!didReplace) {
+
+		const tryReplace = (): { line: number; replacedLine: string } | null => {
+			for (const line of candidateLines) {
+				const current = editor.getLine(line)
+				// Prefer matching the new filename, but fall back to matching the original pasted filename
+				// (Obsidian sometimes inserts markdown embeds with the old name and does not update them immediately).
+				let res = replaceImageEmbedsWithHtml(current, newName, newName, file.parent.path, config)
+				if (!res.didReplace && originName && originName !== newName) {
+					res = replaceImageEmbedsWithHtml(current, originName, newName, file.parent.path, config)
+				}
+				if (res.didReplace) return { line, replacedLine: res.replacedLine }
+			}
+			return null
+		}
+
+		// Replace the embed with HTML, retrying a few times in case editor/link updates lag.
+		let found: { line: number; replacedLine: string } | null = null
+		for (let attempt = 0; attempt < MAX_REPLACE_ATTEMPTS && !found; attempt++) {
+			found = tryReplace()
+			if (found) break
+			await new Promise<void>((resolve) => setTimeout(resolve, REPLACE_RETRY_DELAY_MS))
+		}
+
+		if (!found) {
 			new Notice('Output as HTML: could not find updated image embed to replace (try again)')
 			return
 		}
-		debugLog('replacedLine:', replacedLine)
 
-		// Get current line length again in case it changed
-		const currentLine = editor.getLine(cursorLine)
+		debugLog('replacedLine:', found.replacedLine)
+		const currentLine = editor.getLine(found.line)
 		editor.transaction({
 			changes: [
 				{
-					from: { line: cursorLine, ch: 0 },
-					to: { line: cursorLine, ch: currentLine.length },
-					text: replacedLine,
+					from: { line: found.line, ch: 0 },
+					to: { line: found.line, ch: currentLine.length },
+					text: found.replacedLine,
 				}
 			]
 		})

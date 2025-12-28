@@ -4,15 +4,13 @@
  * Extracted from obsidian-img2html plugin
  */
 
+import { escapeRegExp } from './utils'
+
 export interface Html2ImgConfig {
 	imageWidth: string
 	includeAlt: boolean
 	useCustomPath: boolean
 	customPath: string
-}
-
-function escapeRegExp(s: string): string {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function buildImgWidthAttrs(widthRaw: string): { widthAttr: string; styleAttr: string } {
@@ -143,19 +141,40 @@ export function extractObsidianEmbedPath(embed: string): string | null {
  */
 export function replaceImageEmbedsWithHtml(
 	line: string,
-	fileName: string,
+	matchFileName: string,
+	outputFileName: string,
 	imageDir: string,
 	config: Html2ImgConfig
 ): { replacedLine: string; didReplace: boolean } {
-	const flexibleFileName = escapeRegExp(fileName).replace(/ /g, '(?: |%20)')
+	const flexibleFileName = escapeRegExp(matchFileName).replace(/ /g, '(?: |%20)')
 	const embedPattern = new RegExp(
 		`!\\[\\[[^\\]]*${flexibleFileName}[^\\]]*\\]\\]|!\\[[^\\]]*\\]\\([^)]*${flexibleFileName}[^)]*\\)`,
 		'g'
 	)
 
 	const replacedLine = line.replace(embedPattern, (embed) => {
-		const imagePathFromEmbed = extractObsidianEmbedPath(embed) || ''
-		return createHtmlImgTag(fileName, imagePathFromEmbed, imageDir, config)
+		let imagePathFromEmbed = extractObsidianEmbedPath(embed) || ''
+
+		// If Obsidian hasn't updated the embed path after rename yet (common with markdown embeds),
+		// rewrite the basename to the new filename so the generated HTML points at the renamed file.
+		if (imagePathFromEmbed && !config.useCustomPath && outputFileName !== matchFileName) {
+			const parts = imagePathFromEmbed.split('/')
+			const basename = parts[parts.length - 1] || ''
+			let basenameMatches = basename === matchFileName
+			if (!basenameMatches) {
+				try {
+					basenameMatches = decodeURIComponent(basename) === matchFileName
+				} catch {
+					// ignore decode errors
+				}
+			}
+			if (basenameMatches) {
+				parts[parts.length - 1] = outputFileName
+				imagePathFromEmbed = parts.join('/')
+			}
+		}
+
+		return createHtmlImgTag(outputFileName, imagePathFromEmbed, imageDir, config)
 	})
 
 	return {

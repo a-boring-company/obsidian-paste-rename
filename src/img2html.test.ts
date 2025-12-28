@@ -407,7 +407,7 @@ describe('replaceImageEmbedsWithHtml', () => {
 
 	it('should replace a wikilink embed (spaces)', () => {
 		const line = 'prefix ![[foo bar.png]] suffix'
-		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', 'foo bar.png', '', config)
 		expect(result.didReplace).toBe(true)
 		expect(result.replacedLine).toContain('prefix ')
 		expect(result.replacedLine).toContain(' suffix')
@@ -416,38 +416,52 @@ describe('replaceImageEmbedsWithHtml', () => {
 
 	it('should replace a wikilink embed with pipe suffix', () => {
 		const line = '![[foo bar.png|300]]'
-		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', 'foo bar.png', '', config)
 		expect(result.didReplace).toBe(true)
 		expect(result.replacedLine).toContain('<img src=\"foo bar.png\"')
 	})
 
 	it('should replace a wikilink embed (%20)', () => {
 		const line = '![[foo%20bar.png]]'
-		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', 'foo bar.png', '', config)
 		expect(result.didReplace).toBe(true)
 		// Preserve the exact path extracted from the embed
-		expect(result.replacedLine).toContain('<img src="foo%20bar.png"')
+		expect(result.replacedLine).toContain('<img src=\"foo%20bar.png\"')
 	})
 
 	it('should replace a markdown embed with spaces', () => {
 		const line = '![alt](foo bar.png)'
-		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', 'foo bar.png', '', config)
 		expect(result.didReplace).toBe(true)
 		expect(result.replacedLine).toContain('<img src="foo bar.png"')
 	})
 
 	it('should replace a markdown embed with angle brackets', () => {
 		const line = '![alt](<foo bar.png>)'
-		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', 'foo bar.png', '', config)
 		expect(result.didReplace).toBe(true)
 		expect(result.replacedLine).toContain('<img src="foo bar.png"')
 	})
 
 	it('should not replace when the target filename is not present', () => {
 		const line = '![[other.png]]'
-		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', '', config)
+		const result = replaceImageEmbedsWithHtml(line, 'foo bar.png', 'foo bar.png', '', config)
 		expect(result.didReplace).toBe(false)
 		expect(result.replacedLine).toBe(line)
+	})
+
+	it('should match old embed name but output new filename (rewrite src path)', () => {
+		const line = '![](appx/Pasted%20image%2020251228160717.png)'
+		const result = replaceImageEmbedsWithHtml(
+			line,
+			'Pasted image 20251228160717.png',
+			'test.png',
+			'appx',
+			config
+		)
+		expect(result.didReplace).toBe(true)
+		// Embed path should be rewritten to the new filename
+		expect(result.replacedLine).toContain('<img src=\"appx/test.png\"')
 	})
 })
 
