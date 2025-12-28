@@ -264,7 +264,7 @@ describe('createHtmlImgTag', () => {
 		expect(result).toContain('<figcaption><b>Figure</b>. &quot;&gt;&lt;img src=x onerror=alert(1)&gt;.');
 	});
 
-	it('should use width attribute for integer widths', () => {
+	it('should use style width for integer widths (px)', () => {
 		const result = createHtmlImgTag(
 			'plot.png',
 			'plot.png',
@@ -276,9 +276,8 @@ describe('createHtmlImgTag', () => {
 				customPath: '',
 			}
 		);
-
-		expect(result).toContain('<img src="plot.png" width="500">');
-		expect(result).not.toContain('style="width:');
+		expect(result).toContain('<img src="plot.png" style="width: 500px;">');
+		expect(result).not.toContain(' width=');
 	});
 
 	it('should handle filenames with spaces (real-world Obsidian rename)', () => {

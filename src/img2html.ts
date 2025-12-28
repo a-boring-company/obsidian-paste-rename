@@ -16,14 +16,12 @@ export interface Html2ImgConfig {
 function buildImgWidthAttrs(widthRaw: string): { widthAttr: string; styleAttr: string } {
 	const width = (widthRaw ?? '').trim()
 	if (!width) return { widthAttr: '', styleAttr: '' }
-	// The HTML <img> width attribute expects an integer pixel value.
-	// For percentages/px/auto/etc, use CSS style instead.
-	if (/^\d+$/.test(width)) {
-		return { widthAttr: ` width="${escapeHtml(width)}"`, styleAttr: '' }
-	}
+	// Always use style attribute for modern HTML output consistency.
+	// Normalize bare numbers to pixel widths.
+	const styleWidth = /^\d+$/.test(width) ? `${width}px` : width
 	// Validate the width to prevent CSS injection before using it in a style attribute.
-	if (/^(auto|(?:\d*\.?\d+)(?:px|%|em|rem|vw|vh))$/.test(width)) {
-		return { widthAttr: '', styleAttr: ` style="width: ${escapeHtml(width)};"` }
+	if (/^(auto|(?:\d*\.?\d+)(?:px|%|em|rem|vw|vh))$/.test(styleWidth)) {
+		return { widthAttr: '', styleAttr: ` style="width: ${escapeHtml(styleWidth)};"` }
 	}
 	return { widthAttr: '', styleAttr: '' }
 }
@@ -168,8 +166,9 @@ export function replaceImageEmbedsWithHtml(
 			if (!basenameMatches) {
 				try {
 					basenameMatches = decodeURIComponent(basename) === matchFileName
-				} catch {
-					// ignore decode errors
+				} catch (e) {
+					// ignore decode errors, but log them for debugging
+					console.warn(`Failed to decode URI component in embed path: ${basename}`, e);
 				}
 			}
 			if (basenameMatches) {
