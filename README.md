@@ -1,109 +1,62 @@
-# Paste image rename
+# Paste Rename
 
-Paste image rename renames images and other attachments when they are added to an [Obsidian](https://obsidian.md/) vault.
-It can ask for a name, generate one from a pattern, avoid filename collisions, or rename existing embeds in batches.
+Paste Rename renames images and other attachments when they are added to an [Obsidian](https://obsidian.md/) vault. It is the maintained successor to [Paste image rename](https://github.com/reorx/obsidian-paste-image-rename).
 
-![Rename prompt with a generated filename](images/modal-fileName.png)
+The successor uses repository slug `obsidian-paste-rename`, plugin ID `paste-rename`, and display name **Paste Rename**. It is not yet listed in Obsidian's Community Plugins directory.
 
-## Installation
+## Install
 
-Open **Settings > Community plugins > Browse** in Obsidian, search for **Paste image rename**, then install and enable the plugin.
+Until the Community Plugins listing is updated, build and install from source:
 
-This repository is a maintenance fork of [reorx/obsidian-paste-image-rename](https://github.com/reorx/obsidian-paste-image-rename).
-Obsidian's Community Plugins registry currently points to that upstream repository.
-Use the [development setup](CONTRIBUTING.md#develop-in-an-obsidian-vault) when testing a build from this checkout.
+```bash
+npm ci
+npm run build
+mkdir -p "/path/to/vault/.obsidian/plugins/paste-rename"
+cp build/main.js build/manifest.json build/styles.css \
+  "/path/to/vault/.obsidian/plugins/paste-rename/"
+```
 
-## Quick start
+Reload Obsidian, then enable **Paste Rename** under **Settings > Community plugins**.
 
-1. Open a Markdown note in Obsidian.
-2. Paste an image into the note.
-3. Enter a filename without the extension, then select **Rename** or press Enter.
-4. Open **Settings > Paste image rename** to change the naming pattern or enable automatic renaming.
+## Use
 
-By default, the plugin handles files whose names begin with `Pasted image `.
-Enable **Handle all attachments** to process dragged or copied attachments that keep their original filenames.
+Paste an image into an open Markdown note. Enter a filename without the extension, then press Enter. Enable **Auto rename** to skip the prompt or **Handle all attachments** to include files that keep their original names.
 
-## Naming patterns
-
-The default pattern is `{{fileName}}`, which uses the active note's filename without `.md`.
+The default pattern is `{{fileName}}`. Available variables are:
 
 | Variable | Value |
 | --- | --- |
-| `{{fileName}}` | The active note's filename without the `.md` extension. |
-| `{{dirName}}` | The name of the directory that contains the active note. The vault root produces an empty value. |
-| `{{firstHeading}}` | The first level-one heading in the active note. |
-| `{{imageNameKey}}` | The value of the `imageNameKey` frontmatter property. |
-| `{{frontmatter:key}}` | The value of any frontmatter property named `key`. |
-| `{{DATE:FORMAT}}` | The current date formatted with a [Moment.js format string](https://momentjs.com/docs/#/displaying/format/). |
+| `{{fileName}}` | Active note name without `.md` |
+| `{{dirName}}` | Active note's directory name |
+| `{{firstHeading}}` | First level-one heading |
+| `{{imageNameKey}}` | `imageNameKey` frontmatter value |
+| `{{frontmatter:key}}` | Named frontmatter value |
+| `{{DATE:FORMAT}}` | Current date using a [Moment.js format](https://momentjs.com/docs/#/displaying/format/) |
 
-For example, this frontmatter supplies `project-photo` to `{{imageNameKey}}`.
+Name collisions receive the next configured numeric prefix or suffix.
 
-```yaml
----
-imageNameKey: project-photo
----
-```
+## Batch commands
 
-With the default duplicate delimiter, repeated names are numbered as follows.
+- **Batch rename embeded files (in the current file)** previews matches before confirmation.
+- **Batch rename all images instantly (in the current file)** renames supported images without confirmation.
 
-| Pattern | Example results |
-| --- | --- |
-| `{{fileName}}` | `My note.png`, `My note-1.png`, `My note-2.png`. |
-| `{{imageNameKey}}` | `project-photo.png`, `project-photo-1.png`, `project-photo-2.png`. |
-| `{{imageNameKey}}-{{DATE:YYYYMMDD}}` | `project-photo-20260813.png`, `project-photo-20260813-1.png`. |
+The instant command can stop after partially renaming a note if it encounters an unresolved or unsupported embed. Back up the vault or test on a disposable note first.
 
-The plugin checks the attachment's directory before renaming.
-If the requested name already exists, it uses the next numeric prefix or suffix according to the duplicate-number settings.
+## Migrate from Paste image rename
 
-## Commands
+The new plugin ID means Obsidian treats Paste Rename as a separate plugin.
 
-Open the Obsidian command palette to use either batch command.
+1. Disable the predecessor.
+2. Install Paste Rename in `.obsidian/plugins/paste-rename`.
+3. Reconfigure the plugin, or close Obsidian and copy `data.json` from `.obsidian/plugins/obsidian-paste-image-rename/` into the new folder.
+4. Confirm normal operation before removing the predecessor.
 
-- **Batch rename embeded files (in the current file)** previews regular-expression matches and replacement names before asking for confirmation.
-- **Batch rename all images instantly (in the current file)** applies the configured image name pattern without a confirmation step.
+Back up `data.json` before copying it.
 
-The second command renames files immediately.
-It checks extension text case-insensitively for the substrings `jpg`, `jpeg`, `png`, `gif`, `tiff`, or `webp` instead of matching a complete extension.
-For example, `.tif` does not match, while a longer extension that contains one of those strings does.
-If it reaches an embed that it cannot resolve or whose extension is unsupported, it stops, so earlier images may already have been renamed.
-Back up the vault or test the pattern on a disposable note before using it on important attachments.
+## Development
 
-![Batch rename preview](images/batch-renaming.png)
-
-## Settings
-
-| Setting | Effect |
-| --- | --- |
-| **Image name pattern** | Defines the generated name without the extension. |
-| **Duplicate number at start (or end)** | Places the collision number before the name when enabled and after the name when disabled. |
-| **Duplicate number delimiter** | Separates the generated number from the base name. The default is `-`. |
-| **Always add duplicate number** | Adds a number even when the unnumbered filename is available. |
-| **Auto rename** | Renames attachments without opening the rename prompt when the pattern produces a meaningful name. A name made only of whitespace or duplicate-delimiter characters still opens the prompt. |
-| **Handle all attachments** | Processes newly created non-Markdown attachments, including dragged or copied files. |
-| **Exclude extension pattern** | Skips matching extensions only for attachments routed through **Handle all attachments**. It does not apply to the default `Pasted image ` path. The regular expression is tested against the extension without the leading dot. |
-| **Disable rename notice** | Suppresses the plugin's successful-rename notice. Obsidian may still show its own link-change notice. |
-
-For example, `docx?|xlsx?|pptx?|zip|rar` excludes common office documents and archives.
-
-## Troubleshooting
-
-### The prompt does not open when I paste a file on Windows
-
-Files copied from Windows File Explorer usually keep their original filename instead of receiving Obsidian's `Pasted image ` prefix.
-Enable **Handle all attachments** so the plugin processes those files.
-
-Also check whether **Auto rename** is enabled, because automatic renaming deliberately skips the prompt.
-
-### An attachment was not renamed
-
-Check that a Markdown note is active and the generated pattern contains a character other than whitespace or the configured duplicate delimiter.
-For attachments routed through **Handle all attachments**, also check whether the extension matches **Exclude extension pattern**.
-The exclusion setting does not apply to files handled through the default `Pasted image ` path.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository map, local build workflow, validation commands, and release boundaries.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for commands, validation, and release rules.
 
 ## Licence
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE). The original copyright notice is retained.

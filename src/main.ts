@@ -61,7 +61,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
 const PASTED_IMAGE_PREFIX = 'Pasted image '
 
 
-export default class PasteImageRenamePlugin extends Plugin {
+export default class PasteRenamePlugin extends Plugin {
 	settings: PluginSettings
 	modals: Modal[] = []
 	excludeExtensionRegex: RegExp
@@ -569,9 +569,9 @@ Here are some examples from pattern to image names (repeat in sequence), variabl
 `
 
 class SettingTab extends PluginSettingTab {
-	plugin: PasteImageRenamePlugin;
+	plugin: PasteRenamePlugin;
 
-	constructor(app: App, plugin: PasteImageRenamePlugin) {
+	constructor(app: App, plugin: PasteRenamePlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
