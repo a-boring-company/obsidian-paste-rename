@@ -1,8 +1,9 @@
 import { Modal, TFile, App, Setting } from 'obsidian';
 
 import {
-  path, createElementTree, debugLog, lockInputMethodComposition,
+	path, createElementTree, debugLog, lockInputMethodComposition,
 } from './utils';
+import { normalizeFilenameStem } from './filename';
 
 interface State {
 	namePattern: string
@@ -41,7 +42,7 @@ export class ImageBatchRenameModal extends Modal {
 	onOpen() {
 		this.containerEl.addClass('image-rename-modal')
 		const { contentEl, titleEl } = this;
-		titleEl.setText('Batch rename embeded files')
+		titleEl.setText('Batch rename embedded attachments')
 
 		const namePatternSetting = new Setting(contentEl)
 			.setName('Name pattern')
@@ -151,7 +152,7 @@ export class ImageBatchRenameModal extends Modal {
 						new ConfirmModal(
 							this.app,
 							'Confirm rename all',
-							`Are you sure? This will rename all the ${this.state.renameTasks.length} images matched the pattern.`,
+							`Are you sure? This will rename all the ${this.state.renameTasks.length} attachments matched by the pattern.`,
 							() => {
 								this.renameAll()
 								this.close()
@@ -209,7 +210,7 @@ export class ImageBatchRenameModal extends Modal {
 			let renamedName = file.name
 			if (state.nameReplace) {
 				namePatternRegex.lastIndex = 0
-				renamedName = stem.replace(namePatternRegex, state.nameReplace)
+				renamedName = normalizeFilenameStem(stem.replace(namePatternRegex, state.nameReplace))
 				renamedName = `${renamedName}.${file.extension}`
 			}
 			renameTasks.push({

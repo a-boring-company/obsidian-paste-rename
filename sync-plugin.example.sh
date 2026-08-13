@@ -6,5 +6,5 @@ set -euo pipefail
 plugin_dir="$OBSIDIAN_PLUGINS_DIR/paste-rename"
 
 mkdir -p "$plugin_dir"
-cp build/main.js build/styles.css manifest.json "$plugin_dir/"
+cp build/main.js build/styles.css build/manifest.json build/attachment-types.json "$plugin_dir/"
 touch "$plugin_dir/.hotreload"

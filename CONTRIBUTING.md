@@ -12,7 +12,7 @@ This repository maintains Paste Rename, the successor to [Paste image rename](ht
 
 ## Develop
 
-Use Node.js 18 or newer and the committed lockfile.
+Use Node.js 24 (`.nvmrc`) and the committed lockfile.
 
 ```bash
 npm ci
@@ -28,16 +28,18 @@ OBSIDIAN_PLUGINS_DIR="/path/to/vault/.obsidian/plugins" npm start
 
 The hook installs the build into `.obsidian/plugins/paste-rename`.
 
+The build also installs `attachment-types.json`. Attachment files are renamed in place; no custom attachment directory is introduced.
+
 ## Validate
 
 ```bash
-npm exec -- eslint src --ext .ts
-npm run build
+npm run check
 bash -n sync-plugin.example.sh
+npm ls --depth=0
 git diff --check
 ```
 
-There is no automated test suite. Test changed behaviour in a disposable vault. Report any lint finding that is unchanged from `origin/main` as baseline rather than expanding the change.
+`npm run check` runs zero-warning linting for `src` and `tests`, TypeScript checking, Vitest, V8 coverage with 100% statements/branches/functions/lines for the extracted core, and the production build. Test changed behaviour in a disposable vault as well: verify image figures, Markdown mode, attachment allowlists, ignored extensions, in-place directories, popup batch choices, rename failures, and delayed embed insertion. A passing local check does not replace Obsidian UAT.
 
 Before handoff, inspect the complete `origin/main...HEAD` diff and all committed, staged, unstaged, and untracked files.
 
