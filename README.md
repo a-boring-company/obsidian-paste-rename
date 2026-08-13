@@ -63,7 +63,8 @@ Open the Obsidian command palette to use either batch command.
 - **Batch rename all images instantly (in the current file)** applies the configured image name pattern without a confirmation step.
 
 The second command renames files immediately.
-It only processes JPEG, PNG, GIF, TIFF, and WebP embeds.
+It checks extension text case-insensitively for the substrings `jpg`, `jpeg`, `png`, `gif`, `tiff`, or `webp` instead of matching a complete extension.
+For example, `.tif` does not match, while a longer extension that contains one of those strings does.
 If it reaches an embed that it cannot resolve or whose extension is unsupported, it stops, so earlier images may already have been renamed.
 Back up the vault or test the pattern on a disposable note before using it on important attachments.
 
