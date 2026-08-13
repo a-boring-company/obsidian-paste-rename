@@ -1,8 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-PLUGINS_DIR=""
-PLUGIN_DIR_NAME="obsidian-daily-notes-new-tab"
+: "${OBSIDIAN_PLUGINS_DIR:?Set OBSIDIAN_PLUGINS_DIR to the vault .obsidian/plugins directory}"
 
-mkdir -p "$PLUGINS_DIR/$PLUGIN_DIR_NAME"
-rsync -a main.js manifest.json "$PLUGINS_DIR/$PLUGIN_DIR_NAME"
-touch "$PLUGINS_DIR/$PLUGIN_DIR_NAME/.hotreload"
+plugin_dir="$OBSIDIAN_PLUGINS_DIR/obsidian-paste-image-rename"
+
+mkdir -p "$plugin_dir"
+cp build/main.js build/styles.css manifest.json "$plugin_dir/"
+touch "$plugin_dir/.hotreload"
