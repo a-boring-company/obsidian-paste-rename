@@ -11,7 +11,7 @@
 - Preserve unrelated user changes and keep temporary artefacts under `.tmp/` only. Remove agent-owned temporary artefacts before handoff.
 - Keep review-driven work within the approved goal. Classify every finding as valid, invalid, stale, duplicate, out of scope, or unresolved before acting.
 - Fix every valid in-scope finding regardless of severity. Do not implement adjacent features, refactors, or material scope growth without explicit approval.
-- After each review round, compare the complete `origin/main...HEAD` diff and quantify unexpected file or line growth.
+- After each review round, compare the complete `<approved-base>...HEAD` diff and quantify unexpected file or line growth. Use `origin/main...HEAD` separately for final merge-target assessment.
 </scope_control>
 
 <node_environment>

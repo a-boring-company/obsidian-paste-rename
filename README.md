@@ -63,6 +63,8 @@ Open the Obsidian command palette to use either batch command.
 - **Batch rename all images instantly (in the current file)** applies the configured image name pattern without a confirmation step.
 
 The second command renames files immediately.
+It only processes JPEG, PNG, GIF, TIFF, and WebP embeds.
+If it reaches an embed that it cannot resolve or whose extension is unsupported, it stops, so earlier images may already have been renamed.
 Back up the vault or test the pattern on a disposable note before using it on important attachments.
 
 ![Batch rename preview](images/batch-renaming.png)
@@ -75,9 +77,9 @@ Back up the vault or test the pattern on a disposable note before using it on im
 | **Duplicate number at start (or end)** | Places the collision number before the name when enabled and after the name when disabled. |
 | **Duplicate number delimiter** | Separates the generated number from the base name. The default is `-`. |
 | **Always add duplicate number** | Adds a number even when the unnumbered filename is available. |
-| **Auto rename** | Renames attachments without opening the rename prompt when the pattern produces a non-empty name. |
+| **Auto rename** | Renames attachments without opening the rename prompt when the pattern produces a meaningful name. A name made only of whitespace or duplicate-delimiter characters still opens the prompt. |
 | **Handle all attachments** | Processes newly created non-Markdown attachments, including dragged or copied files. |
-| **Exclude extension pattern** | Skips matching extensions when **Handle all attachments** is enabled. The regular expression is tested against the extension without the leading dot. |
+| **Exclude extension pattern** | Skips matching extensions only for attachments routed through **Handle all attachments**. It does not apply to the default `Pasted image ` path. The regular expression is tested against the extension without the leading dot. |
 | **Disable rename notice** | Suppresses the plugin's successful-rename notice. Obsidian may still show its own link-change notice. |
 
 For example, `docx?|xlsx?|pptx?|zip|rar` excludes common office documents and archives.
@@ -93,8 +95,9 @@ Also check whether **Auto rename** is enabled, because automatic renaming delibe
 
 ### An attachment was not renamed
 
-Check that a Markdown note is active, the generated pattern is not empty, and the attachment's extension does not match **Exclude extension pattern**.
-The exclusion setting only applies when **Handle all attachments** is enabled.
+Check that a Markdown note is active and the generated pattern contains a character other than whitespace or the configured duplicate delimiter.
+For attachments routed through **Handle all attachments**, also check whether the extension matches **Exclude extension pattern**.
+The exclusion setting does not apply to files handled through the default `Pasted image ` path.
 
 ## Contributing
 
