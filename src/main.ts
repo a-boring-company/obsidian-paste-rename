@@ -161,9 +161,7 @@ export default class PasteRenamePlugin extends Plugin {
 		this.registerEvent(this.app.vault.on('modify', file => this.metadataLedger.invalidate(file.path)))
 		this.registerEvent(this.app.vault.on('delete', file => this.metadataLedger.invalidate(file.path)))
 		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => this.metadataLedger.invalidateRename(oldPath, file.path)))
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const pkg = require('../package.json')
-		console.log(`Plugin loading: ${pkg.name} ${pkg.version} BUILD_ENV=${process.env.BUILD_ENV}`)
+		console.log(`Plugin loading: ${this.manifest.name} ${this.manifest.version} BUILD_ENV=${process.env.BUILD_ENV}`)
 		await this.loadSettings();
 		if (!this.isCurrent(generation)) return
 		await this.loadAttachmentTypes(generation);
