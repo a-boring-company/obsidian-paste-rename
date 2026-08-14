@@ -89,12 +89,13 @@ export function classifyAttachmentReference(input: AttachmentReferenceStateInput
 export function batchNativeLinkSyncDecision(
 	diskState: AttachmentReferenceState | null,
 	editorState: AttachmentReferenceState,
+	nativeSyncSettled = false,
 ): NativeLinkSyncDecision {
 	if (editorState === 'none') return 'abort'
 	if (diskState === null) return 'abort'
 	if (diskState === 'current') {
 		if (editorState === 'current') return 'proceed'
-		return 'wait'
+		return nativeSyncSettled && editorState === 'old' ? 'proceed' : 'wait'
 	}
 	return 'proceed'
 }

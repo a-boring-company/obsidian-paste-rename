@@ -889,7 +889,7 @@ export default class PasteRenamePlugin extends Plugin {
 			const editorContent = session.editor.getValue()
 			const diskState = diskContent === baselineContent ? 'old' : diskContent === expectedNativeContent ? 'current' : null
 			const editorState = editorContent === baselineContent ? 'old' : editorContent === expectedNativeContent ? 'current' : 'none'
-			if (!hasReferences || batchNativeLinkSyncDecision(diskState, editorState) === 'proceed') return { ready: true as const }
+			if (!hasReferences || batchNativeLinkSyncDecision(diskState, editorState, attempt + 1 === FIGURE_RETRY_COUNT) === 'proceed') return { ready: true as const }
 			if (attempt + 1 < FIGURE_RETRY_COUNT) {
 				await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
 				if (!this.isCurrent(generation)) return null

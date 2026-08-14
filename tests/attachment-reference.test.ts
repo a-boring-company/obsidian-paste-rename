@@ -49,6 +49,8 @@ describe('attachment reference replacement', () => {
 
 	it('waits for a delayed native update across the whole source document', () => {
 		expect(batchNativeLinkSyncDecision('current', 'old')).toBe('wait')
+		expect(batchNativeLinkSyncDecision('current', 'old', false)).toBe('wait')
+		expect(batchNativeLinkSyncDecision('current', 'old', true)).toBe('proceed')
 		expect(batchNativeLinkSyncDecision('current', 'current')).toBe('proceed')
 		expect(batchNativeLinkSyncDecision('current', 'none')).toBe('abort')
 		expect(batchNativeLinkSyncDecision('none', 'none')).toBe('abort')
