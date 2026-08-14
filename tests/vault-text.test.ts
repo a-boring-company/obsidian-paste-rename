@@ -7,13 +7,21 @@ type ProcessVault = {
 	process: (_file: unknown, transform: (value: string) => string) => Promise<string>
 }
 
+function singleSnapshotVault(snapshot: string, onResult?: (value: string) => void): ProcessVault {
+	return {
+		process: async (_file, transform) => {
+			const result = transform(snapshot)
+			onResult?.(result)
+			return result
+		},
+	}
+}
+
 describe('atomic vault text updates', () => {
 	it('writes the requested text for either exact allowed process snapshot', async () => {
 		for (const snapshot of ['baseline', 'native']) {
 			let written = ''
-			const vault: ProcessVault = {
-				process: async (_file, transform) => written = transform(snapshot),
-			}
+			const vault = singleSnapshotVault(snapshot, value => { written = value })
 			expect(await compareAndWriteVaultText(vault, {} as TFile, value => value === 'baseline' || value === 'native', () => true, 'next')).toBe('written')
 			expect(written).toBe('next')
 		}
@@ -21,9 +29,7 @@ describe('atomic vault text updates', () => {
 
 	it('rejects an external process snapshot without overwriting it', async () => {
 		let transformed = ''
-		const vault: ProcessVault = {
-			process: async (_file, transform) => transformed = transform('external'),
-		}
+		const vault = singleSnapshotVault('external', value => { transformed = value })
 		expect(await compareAndWriteVaultText(vault, {} as TFile, value => value === 'baseline' || value === 'native', () => true, 'next')).toBe('conflict')
 		expect(transformed).toBe('external')
 	})
@@ -31,9 +37,7 @@ describe('atomic vault text updates', () => {
 	it('persists a dirty editor snapshot only from the captured view data baseline', async () => {
 		const viewData = 'view baseline'
 		let written = ''
-		const vault: ProcessVault = {
-			process: async (_file, transform) => written = transform(viewData),
-		}
+		const vault = singleSnapshotVault(viewData, value => { written = value })
 		expect(await compareAndWriteVaultText(vault, {} as TFile, value => value === viewData, () => true, 'editor snapshot')).toBe('written')
 		expect(written).toBe('editor snapshot')
 	})

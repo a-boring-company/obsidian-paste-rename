@@ -96,22 +96,14 @@ describe('batch source content', () => {
 		}
 
 		const ledger = new BatchMetadataLedger()
-		const start = performance.now()
 		for (let index = 0; index < 10000; index++) ledger.record(`notes/${index}.md`, `content-${index}\uD800`, cache)
-		const elapsedMs = performance.now() - start
-		console.info(`BatchMetadataLedger 10k-event benchmark: ${elapsedMs.toFixed(2)}ms`)
-		expect(Number.isFinite(elapsedMs)).toBe(true)
 		expect(ledger.exact('notes/0.md', 'content-0\uD800')).toBe(cache)
 		expect(ledger.exact('notes/9999.md', 'content-9999\uD800')).toBe(cache)
 		expect(ledger.exact('notes/10000.md', 'content-10000\uD800')).toBeNull()
 		expect(ledger.exact('notes/9999.md', 'stale')).toBeNull()
 
 		const largeNote = deterministicCodeUnits(2 * 1024 * 1024)
-		const largeStart = performance.now()
 		const largeFingerprint = fingerprintUtf16Sha256(largeNote)
-		const largeElapsedMs = performance.now() - largeStart
-		console.info(`BatchMetadataLedger 2MiB-note fingerprint benchmark: ${largeElapsedMs.toFixed(2)}ms`)
-		expect(Number.isFinite(largeElapsedMs)).toBe(true)
 		expect(largeFingerprint).toBe(nodeUtf16Sha256(largeNote))
 
 		const invalidated = new BatchMetadataLedger()

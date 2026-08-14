@@ -19,16 +19,18 @@ describe('attachment reference replacement', () => {
 		})).toBe('none')
 	})
 
-	it('allows only proven disk states to proceed after native rename', () => {
-		expect(nativeLinkSyncDecision('current', 'old')).toBe('wait')
-		expect(nativeLinkSyncDecision('current', 'none')).toBe('abort')
-		expect(nativeLinkSyncDecision('current', 'current')).toBe('proceed')
-		expect(nativeLinkSyncDecision('old', 'old')).toBe('proceed')
-		expect(nativeLinkSyncDecision('none', 'old')).toBe('proceed')
-		expect(nativeLinkSyncDecision('none', 'current')).toBe('proceed')
-		expect(nativeLinkSyncDecision('none', 'none')).toBe('abort')
-		expect(nativeLinkSyncDecision(null, 'old')).toBe('abort')
-		expect(nativeLinkSyncDecision(null, 'current')).toBe('abort')
+	it.each([
+		['current', 'old', 'wait'],
+		['current', 'none', 'abort'],
+		['current', 'current', 'proceed'],
+		['old', 'old', 'proceed'],
+		['none', 'old', 'proceed'],
+		['none', 'current', 'proceed'],
+		['none', 'none', 'abort'],
+		[null, 'old', 'abort'],
+		[null, 'current', 'abort'],
+	] as const)('allows disk=%s and editor=%s to resolve as %s', (disk, editor, expected) => {
+		expect(nativeLinkSyncDecision(disk, editor)).toBe(expected)
 	})
 
 	it('allows an unsaved editor old reference when disk has not flushed it', () => {
@@ -47,15 +49,17 @@ describe('attachment reference replacement', () => {
 		})?.text).toBe('<figure>new</figure>')
 	})
 
-	it('waits for a delayed native update across the whole source document', () => {
-		expect(batchNativeLinkSyncDecision('current', 'old')).toBe('wait')
-		expect(batchNativeLinkSyncDecision('current', 'old', false)).toBe('wait')
-		expect(batchNativeLinkSyncDecision('current', 'old', true)).toBe('proceed')
-		expect(batchNativeLinkSyncDecision('current', 'current')).toBe('proceed')
-		expect(batchNativeLinkSyncDecision('current', 'none')).toBe('abort')
-		expect(batchNativeLinkSyncDecision('none', 'none')).toBe('abort')
-		expect(batchNativeLinkSyncDecision(null, 'old')).toBe('abort')
-		expect(batchNativeLinkSyncDecision('old', 'old')).toBe('proceed')
+	it.each([
+		['current', 'old', undefined, 'wait'],
+		['current', 'old', false, 'wait'],
+		['current', 'old', true, 'proceed'],
+		['current', 'current', undefined, 'proceed'],
+		['current', 'none', undefined, 'abort'],
+		['none', 'none', undefined, 'abort'],
+		[null, 'old', undefined, 'abort'],
+		['old', 'old', undefined, 'proceed'],
+	] as const)('resolves disk=%s editor=%s final=%s as %s', (disk, editor, finalAttempt, expected) => {
+		expect(batchNativeLinkSyncDecision(disk, editor, finalAttempt)).toBe(expected)
 	})
 
 	it('manually converts an old wikilink to HTML when alwaysUpdateLinks is false', () => {
@@ -67,28 +71,33 @@ describe('attachment reference replacement', () => {
 		expect(result?.text).toBe('before ![[new.png]] after')
 	})
 
-	it('keeps Markdown containers while updating only their exact destination', () => {
+	it.each([
+		['> ![[old.png]]', '> ![[new.png]]'],
+		['- ![[old.png]]', '- ![[new.png]]'],
+		['12. ![[old.png]]', '12. ![[new.png]]'],
+		['> - ![[old.png]]', '> - ![[new.png]]'],
+		['> > ![[old.png]]', '> > ![[new.png]]'],
+		['    ![[old.png]]', '    ![[new.png]]'],
+		['```\n![[old.png]]\n```', '```\n![[new.png]]\n```'],
+		['- ![Alt](old.png "Title")', '- ![Alt](new.png "Title")'],
+		['> ![[old.png|Report]]', '> ![[new.png|Report]]'],
+		['- before ![[old.png|Report]] after', '- before ![[new.png|Report]] after'],
+	] as const)('keeps container destination exact for %s', (content, expected) => {
 		const replacement = '<figure>\n<img src="new.png">\n</figure>'
-		const replace = (content: string) => replaceAttachmentReference({
+		const result = replaceAttachmentReference({
 			content, cursor: Math.max(0, content.indexOf('old.png')), targetPaths: ['old.png'], replacement,
 			replacementPath: 'new.png', image: true, asFigure: true,
-		})?.text
-		expect(replace('> ![[old.png]]')).toBe('> ![[new.png]]')
-		expect(replace('- ![[old.png]]')).toBe('- ![[new.png]]')
-		expect(replace('12. ![[old.png]]')).toBe('12. ![[new.png]]')
-		expect(replace('> - ![[old.png]]')).toBe('> - ![[new.png]]')
-		expect(replace('> > ![[old.png]]')).toBe('> > ![[new.png]]')
-		expect(replace('    ![[old.png]]')).toBe('    ![[new.png]]')
-		expect(replace('```\n![[old.png]]\n```')).toBe('```\n![[new.png]]\n```')
-		expect(replace('- ![Alt](old.png "Title")')).toBe('- ![Alt](new.png "Title")')
-		expect(replace('> ![[old.png|Report]]')).toBe('> ![[new.png|Report]]')
-		expect(replace('- before ![[old.png|Report]] after')).toBe('- before ![[new.png|Report]] after')
+		})
+		expect(result?.text).toBe(expected)
+	})
+
+	it.each([
+		['- ![[new.png|Report]]', 8],
+		['> ![Alt](new.png "Title")', 8],
+	] as const)('recognizes current container reference %s', (content, cursor) => {
+		const replacement = '<figure>\n<img src="new.png">\n</figure>'
 		expect(replaceAttachmentReference({
-			content: '- ![[new.png|Report]]', cursor: 8, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
-			replacement, replacementPath: 'new.png', image: true, asFigure: true,
-		})?.matched).toBe(true)
-		expect(replaceAttachmentReference({
-			content: '> ![Alt](new.png "Title")', cursor: 8, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
+			content, cursor, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
 			replacement, replacementPath: 'new.png', image: true, asFigure: true,
 		})?.matched).toBe(true)
 	})
@@ -109,33 +118,24 @@ describe('attachment reference replacement', () => {
 		expect(result?.text).toBe('![old.png](new.png)')
 	})
 
-	it('updates embedded and non-embedded non-image wiki and Markdown references', () => {
+	it.each([
+		['![[old.pdf|Report]]', '[[new.pdf|Report]]', '![[new.pdf|Report]]'],
+		['[[old.pdf|Report]]', '[[new.pdf|Report]]', '[[new.pdf|Report]]'],
+		['![Report](old.pdf "Title")', '[Report](new.pdf "Title")', '![Report](new.pdf "Title")'],
+		['[Report](old.pdf "Title")', '[Report](new.pdf "Title")', '[Report](new.pdf "Title")'],
+	] as const)('updates non-image destination in %s', (content, replacement, expected) => {
 		expect(replaceAttachmentReference({
-			content: '![[old.pdf|Report]]', cursor: 5, targetPaths: ['old.pdf'],
-			replacement: '[[new.pdf|Report]]', replacementPath: 'new.pdf', image: false, asFigure: false,
-		})?.text).toBe('![[new.pdf|Report]]')
-		expect(replaceAttachmentReference({
-			content: '[[old.pdf|Report]]', cursor: 5, targetPaths: ['old.pdf'],
-			replacement: '[[new.pdf|Report]]', replacementPath: 'new.pdf', image: false, asFigure: false,
-		})?.text).toBe('[[new.pdf|Report]]')
-		expect(replaceAttachmentReference({
-			content: '![Report](old.pdf "Title")', cursor: 5, targetPaths: ['old.pdf'],
-			replacement: '[Report](new.pdf "Title")', replacementPath: 'new.pdf', image: false, asFigure: false,
-		})?.text).toBe('![Report](new.pdf "Title")')
-		expect(replaceAttachmentReference({
-			content: '[Report](old.pdf "Title")', cursor: 5, targetPaths: ['old.pdf'],
-			replacement: '[Report](new.pdf "Title")', replacementPath: 'new.pdf', image: false, asFigure: false,
-		})?.text).toBe('[Report](new.pdf "Title")')
+			content, cursor: 5, targetPaths: ['old.pdf'], replacement, replacementPath: 'new.pdf', image: false, asFigure: false,
+		})?.text).toBe(expected)
 	})
 
-	it('recognizes current embedded non-image references after rename', () => {
+	it.each([
+		['![[new.pdf|Report]]', 5],
+		['![Report](new.pdf "Title")', 5],
+	] as const)('recognizes current embedded non-image reference %s', (content, cursor) => {
 		expect(replaceAttachmentReference({
-			content: '![[new.pdf|Report]]', cursor: 5, targetPaths: ['old.pdf'], currentTargetPaths: ['new.pdf'],
+			content, cursor, targetPaths: ['old.pdf'], currentTargetPaths: ['new.pdf'],
 			replacement: '[[new.pdf|Report]]', replacementPath: 'new.pdf', image: false, asFigure: false,
-		})?.matched).toBe(true)
-		expect(replaceAttachmentReference({
-			content: '![Report](new.pdf "Title")', cursor: 5, targetPaths: ['old.pdf'], currentTargetPaths: ['new.pdf'],
-			replacement: '[Report](new.pdf "Title")', replacementPath: 'new.pdf', image: false, asFigure: false,
 		})?.matched).toBe(true)
 	})
 

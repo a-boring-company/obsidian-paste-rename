@@ -1,14 +1,3 @@
-/* TODOs:
- * - [x] check name existence when saving
- * - [x] imageNameKey in frontmatter
- * - [x] after renaming, cursor should be placed after the image file link
- * - [x] handle image insert from drag'n drop
- * - [ ] select text when opening the renaming modal, make this an option
- * - [ ] add button for use the current file name, imageNameKey, last input name,
- *       segments of last input name
- * - [x] batch rename all pasted images in a file
- * - [ ] add rules for moving matched images to destination folder
- */
 import {
 	App,
 	Editor,
@@ -1289,6 +1278,11 @@ class SettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	async updateSetting<K extends keyof PluginSettings>(field: K, value: PluginSettings[K]): Promise<void> {
+		this.plugin.settings[field] = value
+		await this.plugin.saveSettings()
+	}
+
 	async updateAttachmentTypes(field: 'images' | 'attachments', value: string) {
 		const candidate = {
 			...this.plugin.attachmentTypes,
@@ -1320,10 +1314,7 @@ class SettingTab extends PluginSettingTab {
 			.addText(text => text
 				.setPlaceholder('{{imageNameKey}}')
 				.setValue(this.plugin.settings.imageNamePattern)
-				.onChange(async (value) => {
-					this.plugin.settings.imageNamePattern = value;
-					await this.plugin.saveSettings();
-				}
+				.onChange(value => this.updateSetting('imageNamePattern', value)
 			));
 
 		new Setting(containerEl)
@@ -1332,10 +1323,7 @@ class SettingTab extends PluginSettingTab {
 			.addDropdown(dropdown => dropdown
 				.addOptions({ html: 'HTML figure', markdown: 'Markdown' })
 				.setValue(this.plugin.settings.imageOutput)
-				.onChange(async (value: 'html' | 'markdown') => {
-					this.plugin.settings.imageOutput = value
-					await this.plugin.saveSettings()
-				}))
+				.onChange((value: 'html' | 'markdown') => this.updateSetting('imageOutput', value)))
 
 		new Setting(containerEl)
 			.setName('Figure width')
@@ -1353,11 +1341,7 @@ class SettingTab extends PluginSettingTab {
 			.setDesc(`If enabled, duplicate number will be added at the start as prefix for the image name, otherwise it will be added at the end as suffix for the image name.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.dupNumberAtStart)
-				.onChange(async (value) => {
-					this.plugin.settings.dupNumberAtStart = value
-					await this.plugin.saveSettings()
-				}
-				))
+				.onChange(value => this.updateSetting('dupNumberAtStart', value)))
 
 		new Setting(containerEl)
 			.setName('Duplicate number delimiter')
@@ -1375,33 +1359,21 @@ class SettingTab extends PluginSettingTab {
 			.setDesc(`If enabled, duplicate number will always be added to the image name. Otherwise, it will only be added when the name is duplicated.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.dupNumberAlways)
-				.onChange(async (value) => {
-					this.plugin.settings.dupNumberAlways = value
-					await this.plugin.saveSettings()
-				}
-				))
+				.onChange(value => this.updateSetting('dupNumberAlways', value)))
 
 		new Setting(containerEl)
 			.setName('Auto rename')
 			.setDesc(`By default, the rename modal will always be shown to confirm before renaming, if this option is set, the image will be auto renamed after pasting.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.autoRename)
-				.onChange(async (value) => {
-					this.plugin.settings.autoRename = value;
-					await this.plugin.saveSettings();
-				}
-			));
+				.onChange(value => this.updateSetting('autoRename', value)))
 
 		new Setting(containerEl)
 			.setName('Handle all attachments')
 			.setDesc(`Pasted images are handled when their extension is allowlisted. Enable this for other allowlisted attachments.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.handleAllAttachments)
-				.onChange(async (value) => {
-					this.plugin.settings.handleAllAttachments = value;
-					await this.plugin.saveSettings();
-				}
-			));
+				.onChange(value => this.updateSetting('handleAllAttachments', value)))
 
 		new Setting(containerEl)
 			.setName('Exclude extension pattern')
@@ -1411,11 +1383,7 @@ class SettingTab extends PluginSettingTab {
 			.addTextArea(text => text
 				.setPlaceholder('docx?|xlsx?|pptx?|zip|rar')
 				.setValue(this.plugin.settings.excludeExtensionPattern)
-				.onChange(async (value) => {
-					this.plugin.settings.excludeExtensionPattern = value;
-					await this.plugin.saveSettings();
-				}
-			));
+				.onChange(value => this.updateSetting('excludeExtensionPattern', value)))
 
 		new Setting(containerEl)
 			.setName('Disable rename notice')
@@ -1423,11 +1391,7 @@ class SettingTab extends PluginSettingTab {
 			Note that Obsidian may display a notice when a link has changed, this option cannot disable that.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.disableRenameNotice)
-				.onChange(async (value) => {
-					this.plugin.settings.disableRenameNotice = value;
-					await this.plugin.saveSettings();
-				}
-			));
+				.onChange(value => this.updateSetting('disableRenameNotice', value)))
 
 		new Setting(containerEl)
 			.setName('Image extensions')
