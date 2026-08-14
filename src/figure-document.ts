@@ -34,6 +34,7 @@ interface GeneratedFigureBlock {
 	alt: string
 	caption: string
 	width: number
+	text: string
 }
 
 function splitLines(value: string): LineRecord[] {
@@ -47,7 +48,7 @@ function splitLines(value: string): LineRecord[] {
 	return records
 }
 
-function figureAt(lines: LineRecord[], index: number): GeneratedFigureBlock | null {
+function figureAt(lines: LineRecord[], index: number, value: string): GeneratedFigureBlock | null {
 	if (index + 3 >= lines.length || lines[index].text !== '<figure style="text-align: center;">' || lines[index + 3].text !== '</figure>') return null
 	const image = /^<img src="([^"]+)" alt="([^"]*)" style="width: ([1-9]\d?|100)%;">$/.exec(lines[index + 1].text)
 	const caption = /^<figcaption><b>Figure<\/b>\. ([^<]*)\.<\/figcaption>$/.exec(lines[index + 2].text)
@@ -59,6 +60,7 @@ function figureAt(lines: LineRecord[], index: number): GeneratedFigureBlock | nu
 		alt: image[2],
 		caption: caption[1],
 		width: Number(image[3]),
+		text: value.slice(lines[index].start, lines[index + 3].end),
 	}
 }
 
@@ -85,20 +87,19 @@ function renderFigureWithSource(source: string, stem: string, width: number): st
 	return `<figure style="text-align: center;">\n<img src="${escapeHtml(source)}" alt="${escapeHtml(stem)}" style="width: ${width}%;">\n<figcaption><b>Figure</b>. ${escapeHtml(caption)}.</figcaption>\n</figure>`
 }
 
-function isOwnedGeneratedFigure(value: string, block: GeneratedFigureBlock, expectedPath?: string, expectedStem?: string): boolean {
+function isOwnedGeneratedFigure(block: GeneratedFigureBlock, expectedPath?: string, expectedStem?: string): boolean {
 	const decodedPath = decodeGeneratedFigureSource(block.source)
 	if (!decodedPath || decodedPath.endsWith('/') || (expectedPath !== undefined && !pathsEqual(decodedPath, expectedPath))) return false
 	const stem = stemFromPath(decodedPath)
 	if (expectedStem !== undefined && stem !== expectedStem) return false
 	if (decodeHtmlAttribute(block.alt) !== stem || decodeHtmlAttribute(block.caption) !== stem.replace(/_/g, ' ')) return false
-	const text = value.slice(block.start, block.end)
-	const lineEnding = text.includes('\r\n') ? '\r\n' : '\n'
+	const lineEnding = block.text.includes('\r\n') ? '\r\n' : '\n'
 	const candidates = [
 		renderFigure({ src: decodedPath, stem, width: block.width }),
 		renderFigureWithSource(legacyEncodePath(decodedPath), stem, block.width),
 		renderFigureWithSource(decodedPath, stem, block.width),
 	].map(candidate => candidate.replace(/\n/g, lineEnding))
-	return candidates.some(candidate => candidate === text)
+	return candidates.some(candidate => candidate === block.text)
 }
 
 function generatedFigures(value: string): GeneratedFigureBlock[] {
@@ -119,7 +120,7 @@ function generatedFigures(value: string): GeneratedFigureBlock[] {
 			context = nextContext
 			continue
 		}
-		const block = figureAt(lines, index)
+		const block = figureAt(lines, index, value)
 		context = nextContext
 		if (block) {
 			blocks.push(block)
@@ -133,7 +134,7 @@ export function extractGeneratedFigurePaths(value: string): string[] {
 	const paths: string[] = []
 	for (const block of generatedFigures(value)) {
 		const path = decodeGeneratedFigureSource(block.source)
-		if (path !== null && isOwnedGeneratedFigure(value, block) && !paths.includes(path)) paths.push(path)
+		if (path !== null && isOwnedGeneratedFigure(block) && !paths.includes(path)) paths.push(path)
 	}
 	return paths
 }
@@ -147,8 +148,8 @@ export function replaceGeneratedFigures(
 ): string {
 	const replacements: Array<{ start: number; end: number; text: string }> = []
 	for (const block of generatedFigures(value)) {
-		if (!isOwnedGeneratedFigure(value, block, oldPath, oldStem)) continue
-		const lineEnding = value.slice(block.start, block.end).includes('\r\n') ? '\r\n' : '\n'
+		if (!isOwnedGeneratedFigure(block, oldPath, oldStem)) continue
+		const lineEnding = block.text.includes('\r\n') ? '\r\n' : '\n'
 		replacements.push({
 			start: block.start,
 			end: block.end,
