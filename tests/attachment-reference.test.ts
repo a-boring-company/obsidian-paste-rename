@@ -130,12 +130,12 @@ describe('attachment reference replacement', () => {
 	})
 
 	it.each([
-		['![[new.pdf|Report]]', 5],
-		['![Report](new.pdf "Title")', 5],
-	] as const)('recognizes current embedded non-image reference %s', (content, cursor) => {
+		['![[new.pdf|Report]]', 5, '[[new.pdf|Report]]'],
+		['![Report](new.pdf "Title")', 5, '[Report](new.pdf "Title")'],
+	] as const)('recognizes current embedded non-image reference %s', (content, cursor, replacement) => {
 		expect(replaceAttachmentReference({
 			content, cursor, targetPaths: ['old.pdf'], currentTargetPaths: ['new.pdf'],
-			replacement: '[[new.pdf|Report]]', replacementPath: 'new.pdf', image: false, asFigure: false,
+			replacement, replacementPath: 'new.pdf', image: false, asFigure: false,
 		})?.matched).toBe(true)
 	})
 
