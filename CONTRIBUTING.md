@@ -2,6 +2,8 @@
 
 This repository maintains Paste Rename, the successor to [Paste image rename](https://github.com/reorx/obsidian-paste-image-rename).
 
+Version 2.0.0 targets Obsidian 1.1.1 or newer; batch synchronization relies on its atomic `Vault.process` and metadata-cache changed-event APIs.
+
 ## Repository map
 
 - `src/main.ts`: lifecycle, rename flow, settings, and commands

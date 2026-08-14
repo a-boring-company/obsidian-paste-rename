@@ -1,16 +1,53 @@
 import type { TFile, Vault } from 'obsidian'
 
-type VaultTextAdapter = Pick<Vault, 'read' | 'modify'> & Partial<Pick<Vault, 'process'>>
+type VaultProcessAdapter = Pick<Vault, 'process'>
 
-export async function updateVaultText(
-	vault: VaultTextAdapter,
+export type VaultCompareWriteResult = 'written' | 'conflict' | 'cancelled'
+
+export async function compareAndWriteVaultText(
+	vault: VaultProcessAdapter,
+	file: TFile,
+	allowed: (content: string) => boolean,
+	isCurrent: () => boolean,
+	nextContent: string,
+	beforeWrite?: () => boolean,
+): Promise<VaultCompareWriteResult> {
+	if (!isCurrent()) return 'cancelled'
+	let conflict = false
+	let cancelled = false
+	await vault.process(file, content => {
+		if (!isCurrent()) {
+			cancelled = true
+			return content
+		}
+		if (!allowed(content)) {
+			conflict = true
+			return content
+		}
+		if (beforeWrite && !beforeWrite()) {
+			conflict = true
+			return content
+		}
+		return nextContent
+	})
+	if (cancelled) return 'cancelled'
+	return conflict ? 'conflict' : 'written'
+}
+
+export async function processVaultText(
+	vault: VaultProcessAdapter,
 	file: TFile,
 	transform: (content: string) => string,
-): Promise<void> {
-	if (typeof vault.process === 'function') {
-		await vault.process(file, transform)
-		return
-	}
-	const content = await vault.read(file)
-	await vault.modify(file, transform(content))
+	isCurrent: () => boolean,
+): Promise<'written' | 'cancelled'> {
+	if (!isCurrent()) return 'cancelled'
+	let cancelled = false
+	await vault.process(file, content => {
+		if (!isCurrent()) {
+			cancelled = true
+			return content
+		}
+		return transform(content)
+	})
+	return cancelled ? 'cancelled' : 'written'
 }

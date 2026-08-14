@@ -86,6 +86,19 @@ export function classifyAttachmentReference(input: AttachmentReferenceStateInput
 	return 'old'
 }
 
+export function batchNativeLinkSyncDecision(
+	diskState: AttachmentReferenceState | null,
+	editorState: AttachmentReferenceState,
+): NativeLinkSyncDecision {
+	if (editorState === 'none') return 'abort'
+	if (diskState === null) return 'abort'
+	if (diskState === 'current') {
+		if (editorState === 'current') return 'proceed'
+		return 'wait'
+	}
+	return 'proceed'
+}
+
 export function nativeLinkSyncDecision(
 	diskState: AttachmentReferenceState | null,
 	editorState: AttachmentReferenceState,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from '../src/attachment-reference'
+import { batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from '../src/attachment-reference'
 import { markdownDocumentContextBefore } from '../src/markdown-context'
 
 describe('attachment reference replacement', () => {
@@ -45,6 +45,15 @@ describe('attachment reference replacement', () => {
 			content: '![[old.png]]', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
 			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
 		})?.text).toBe('<figure>new</figure>')
+	})
+
+	it('waits for a delayed native update across the whole source document', () => {
+		expect(batchNativeLinkSyncDecision('current', 'old')).toBe('wait')
+		expect(batchNativeLinkSyncDecision('current', 'current')).toBe('proceed')
+		expect(batchNativeLinkSyncDecision('current', 'none')).toBe('abort')
+		expect(batchNativeLinkSyncDecision('none', 'none')).toBe('abort')
+		expect(batchNativeLinkSyncDecision(null, 'old')).toBe('abort')
+		expect(batchNativeLinkSyncDecision('old', 'old')).toBe('proceed')
 	})
 
 	it('manually converts an old wikilink to HTML when alwaysUpdateLinks is false', () => {

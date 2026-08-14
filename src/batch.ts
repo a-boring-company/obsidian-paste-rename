@@ -4,7 +4,7 @@ import {
 	path, createElementTree, debugLog, lockInputMethodComposition,
 } from './utils';
 import { normalizeFilenameStem } from './filename';
-import { collectBatchReferenceLinks } from './batch-references';
+import { CachedAttachmentGroup } from './batch-occurrences';
 import { beginBatchScan, canRenameBatch, createBatchScanState, invalidateBatchScan, isCurrentBatchScan, publishBatchScan, BatchScanState } from './batch-scan-state';
 
 interface State {
@@ -19,10 +19,11 @@ interface RenameTask {
 	name: string
 }
 
-type renameFuncType = (file: TFile, name: string) => Promise<void>
+type scanFuncType = () => Promise<CachedAttachmentGroup<TFile>[] | null>
+type renameFuncType = (file: TFile, name: string) => Promise<boolean>
 
 export class ImageBatchRenameModal extends Modal {
-	activeFile: TFile
+	scanFunc: scanFuncType
 	renameFunc: renameFuncType
 	onCloseExtra: () => void
 	state: State
@@ -30,9 +31,9 @@ export class ImageBatchRenameModal extends Modal {
 	requestErrorEl: HTMLElement | null = null
 	renameAllButtonEl: HTMLButtonElement | null = null
 
-	constructor(app: App, activeFile: TFile, renameFunc: renameFuncType, onClose: () => void) {
+	constructor(app: App, scanFunc: scanFuncType, renameFunc: renameFuncType, onClose: () => void) {
 		super(app);
-		this.activeFile = activeFile
+		this.scanFunc = scanFunc
 		this.renameFunc = renameFunc
 		this.onCloseExtra = onClose
 
@@ -200,7 +201,7 @@ export class ImageBatchRenameModal extends Modal {
 	async renameAll() {
 		debugLog('renameAll', this.state)
 		for (const task of this.state.renameTasks) {
-			await this.renameFunc(task.file, task.name)
+			if (!await this.renameFunc(task.file, task.name)) break
 		}
 	}
 
@@ -214,50 +215,39 @@ export class ImageBatchRenameModal extends Modal {
 			this.requestErrorEl.style.display = 'none'
 		}
 		const state = { ...this.state }
-		let content: string
 		try {
-			const fileCache = this.app.metadataCache.getFileCache(this.activeFile)
-			content = await this.app.vault.cachedRead(this.activeFile)
-			if (!isCurrentBatchScan(this.scanState, token)) return
-			const links = collectBatchReferenceLinks(fileCache?.embeds?.map(embed => embed.link) ?? [], content)
-			const files = new Map<string, TFile>()
-			for (const link of links) {
-				const file = this.app.metadataCache.getFirstLinkpathDest(link, this.activeFile.path)
-				if (!file) {
-					console.warn('file not found', link)
-					continue
-				}
-				files.set(file.path, file)
-			}
+			const groups = await this.scanFunc()
+			if (!isCurrentBatchScan(this.scanState, token) || !groups) return
 
 			const namePatternRegex = new RegExp(state.namePattern, 'g')
 			const extPatternRegex = new RegExp(state.extPattern)
 			const renameTasks: RenameTask[] = []
-			files.forEach(file => {
-			// match ext (only if extPattern is not empty)
-			if (state.extPattern) {
-				const m0 = extPatternRegex.exec(file.extension)
-				if (!m0) return
-			}
+			groups.forEach(group => {
+				const file = group.file
+				// match ext (only if extPattern is not empty)
+				if (state.extPattern) {
+					const m0 = extPatternRegex.exec(file.extension)
+					if (!m0) return
+				}
 
-			// match stem
-			const stem = file.basename
-			namePatternRegex.lastIndex = 0
-			const m1 = namePatternRegex.exec(stem)
-			if (!m1) return
-
-			let renamedName = file.name
-			if (state.nameReplace) {
+				// match stem
+				const stem = file.basename
 				namePatternRegex.lastIndex = 0
-				renamedName = normalizeFilenameStem(stem.replace(namePatternRegex, state.nameReplace))
-				renamedName = `${renamedName}.${file.extension}`
-			}
-			renameTasks.push({
-				file,
-				name: renamedName,
-			})
+				const m1 = namePatternRegex.exec(stem)
+				if (!m1) return
 
-			createElementTree(tbodyEl, {
+				let renamedName = file.name
+				if (state.nameReplace) {
+					namePatternRegex.lastIndex = 0
+					renamedName = normalizeFilenameStem(stem.replace(namePatternRegex, state.nameReplace))
+					renamedName = `${renamedName}.${file.extension}`
+				}
+				renameTasks.push({
+					file,
+					name: renamedName,
+				})
+
+				createElementTree(tbodyEl, {
 				tag: 'tr',
 				children: [
 					{
@@ -294,7 +284,7 @@ export class ImageBatchRenameModal extends Modal {
 					}
 				]
 
-			})
+				})
 			})
 
 			const published = publishBatchScan(this.scanState, renameTasks.length)
