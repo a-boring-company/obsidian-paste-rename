@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { applyBatchChoice, createBatchChoiceState } from '../src/batch-state'
+import { applyBatchChoice, createBatchChoiceState, shouldAutoRename } from '../src/batch-state'
 
 describe('batch choice state', () => {
 	const tasks = [
@@ -45,5 +45,11 @@ describe('batch choice state', () => {
 		expect(applyBatchChoice({ remaining: [] }, 'cancel')).toEqual({
 		state: { remaining: [] }, decisions: [],
 	})
+	})
+
+	it('falls back to the modal when auto rename has no meaningful generated name', () => {
+		expect(shouldAutoRename(true, true)).toBe(true)
+		expect(shouldAutoRename(true, false)).toBe(false)
+		expect(shouldAutoRename(false, true)).toBe(false)
 	})
 })

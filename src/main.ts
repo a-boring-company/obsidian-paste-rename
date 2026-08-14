@@ -27,10 +27,10 @@ import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
 import { observeAsyncCommand } from './async-command';
-import { applyBatchChoice, createBatchChoiceState } from './batch-state';
+import { applyBatchChoice, createBatchChoiceState, shouldAutoRename } from './batch-state';
 import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent } from './batch-content';
 import { attachmentTargetPathGroups, extractGeneratedDestination, imageLinkText } from './attachment-links';
-import { relativeAttachmentPath, renameInPlace } from './attachment-path';
+import { isRenameNoOp, relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
 import { CachedAttachmentGroup, CachedEmbedOccurrence, attachmentTargetDiscovered, cacheEmbedOccurrences, cacheReferenceOccurrences, deriveRetargetDestinations, groupCachedAttachments, retargetCachedOccurrences } from './batch-occurrences';
 import { AttachmentTypeUserSource, chooseAttachmentTypeConfig } from './attachment-type-files';
@@ -123,6 +123,11 @@ interface ModalChoice {
 
 interface ReferenceReplacement {
 	matched: boolean
+	edit: LineEdit | null
+}
+
+interface RenameFileResult {
+	success: boolean
 	edit: LineEdit | null
 }
 
@@ -280,12 +285,7 @@ export default class PasteRenamePlugin extends Plugin {
 			if (!this.isCurrent(generation)) return
 			const current = taskById.get(state.remaining[0].id)
 			if (!current) break
-			if (current.autoRename) {
-				if (!current.isMeaningful) {
-					if (this.isCurrent(generation)) new Notice('Failed to rename attachment: generated name is empty')
-					state = applyBatchChoice(state, 'cancel').state
-					continue
-				}
+			if (shouldAutoRename(current.autoRename, current.isMeaningful)) {
 				const result = applyBatchChoice(state, 'rename', { name: current.proposedName })
 				await this.applyRenameDecisions(result.decisions, taskById, generation)
 				state = result.state
@@ -312,8 +312,8 @@ export default class PasteRenamePlugin extends Plugin {
 			const task = taskById.get(decision.id)
 			if (!task) continue
 			if (decision.action === 'rename') {
-				const edit = await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation)
-				if (edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, edit)
+				const result = await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation)
+				if (result.success && result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
 			} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
 				const result = await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
 				if (result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
@@ -332,35 +332,38 @@ export default class PasteRenamePlugin extends Plugin {
 		replaceCurrentLine = false,
 		capturedCursor?: EditorPosition,
 		generation = this.cancellation.generation,
-	): Promise<LineEdit | null> {
+	): Promise<RenameFileResult> {
 		const originPath = file.path
 		const suffix = file.extension ? `.${file.extension}` : ''
 		const rawStem = suffix && inputNewName.endsWith(suffix) ? inputNewName.slice(0, -suffix.length) : inputNewName
 		const normalizedStem = normalizeFilenameStem(rawStem)
 		if (!normalizedStem) {
 			if (this.isCurrent(generation)) new Notice('Failed to rename attachment: new name is empty')
-			return null
+			return { success: false, edit: null }
 		}
 		const normalizedName = suffix ? `${normalizedStem}${suffix}` : normalizedStem
-		// deduplicate name
-		const { name: newName } = await this.deduplicateNewName(normalizedName, file)
-		if (!this.isCurrent(generation)) return null
-		debugLog('deduplicated newName:', newName)
 		const originName = file.name
+		const noOp = isRenameNoOp(originName, normalizedName)
+		// deduplicate name
+		const { name: newName } = noOp ? { name: normalizedName } : await this.deduplicateNewName(normalizedName, file)
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
+		debugLog('deduplicated newName:', newName)
 		const oldLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
 		// File system operation: rename the file in its current parent directory.
 		const newPath = renameInPlace(originPath, newName)
-		try {
-			if (!this.isCurrent(generation)) return null
-			await this.app.fileManager.renameFile(file, newPath)
-		} catch (err) {
-			if (this.isCurrent(generation)) new Notice(`Failed to rename ${newName}: ${err}`)
-			return null
+		if (!noOp) {
+			try {
+				if (!this.isCurrent(generation)) return { success: false, edit: null }
+				await this.app.fileManager.renameFile(file, newPath)
+			} catch (err) {
+				if (this.isCurrent(generation)) new Notice(`Failed to rename ${newName}: ${err}`)
+				return { success: false, edit: null }
+			}
 		}
-		if (!this.isCurrent(generation)) return null
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
 
 		if (!replaceCurrentLine) {
-			return null
+			return { success: true, edit: null }
 		}
 
 		// in case fileManager.renameFile may not update the internal link in the active file,
@@ -377,14 +380,14 @@ export default class PasteRenamePlugin extends Plugin {
 			newLinkText,
 		)
 		const diskState = await this.nativeDiskReferenceState(sourcePath, cursor, targetGroups, isImageExtension(file.extension, this.attachmentTypes), generation)
-		if (!this.isCurrent(generation)) return null
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
 		const result = await this.replaceAttachmentReference(file, sourcePath, originPath, cursor, generation, targetGroups, newLinkText, diskState)
-		if (!this.isCurrent(generation)) return null
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
 
 		if (!this.settings.disableRenameNotice) {
 			new Notice(`Renamed ${originName} to ${newName}`)
 		}
-		return result.edit
+		return { success: true, edit: result.edit }
 	}
 
 	referenceStateNearEditor(
@@ -641,7 +644,7 @@ export default class PasteRenamePlugin extends Plugin {
 					if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return null
 					return snapshotFromCache(cached)
 				}
-				} else {
+			} else {
 				const writeResult = await compareAndWriteVaultText(
 					this.app.vault,
 					sourceFile,
@@ -741,7 +744,8 @@ export default class PasteRenamePlugin extends Plugin {
 			this.app.metadataCache.getFirstLinkpathDest(occurrence.link, sourceFile.path)?.path === file.path)
 		const oldPath = file.path
 		const oldStem = file.basename
-		await this.renameFile(file, newName, sourceFile.path, false, undefined, generation)
+		const renameResult = await this.renameFile(file, newName, sourceFile.path, false, undefined, generation)
+		if (!renameResult.success) return false
 		if (!this.isCurrent(generation)) return false
 		if (file.path === oldPath) return true
 		if (!this.isCurrent(generation)) return false

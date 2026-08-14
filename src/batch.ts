@@ -5,7 +5,7 @@ import {
 } from './utils';
 import { normalizeFilenameStem } from './filename';
 import { CachedAttachmentGroup } from './batch-occurrences';
-import { beginBatchScan, canRenameBatch, createBatchScanState, invalidateBatchScan, isCurrentBatchScan, publishBatchScan, BatchScanState } from './batch-scan-state';
+import { BatchScanInput, beginBatchScan, canRenameBatch, createBatchScanState, invalidateBatchScan, isCurrentBatchScan, isCurrentBatchScanInput, publishBatchScan, BatchScanState, supersedeBatchScan } from './batch-scan-state';
 
 interface State {
 	namePattern: string
@@ -30,6 +30,7 @@ export class ImageBatchRenameModal extends Modal {
 	scanState: BatchScanState = createBatchScanState()
 	requestErrorEl: HTMLElement | null = null
 	renameAllButtonEl: HTMLButtonElement | null = null
+	resultsTbodyEl: HTMLElement | null = null
 
 	constructor(app: App, scanFunc: scanFuncType, renameFunc: renameFuncType, onClose: () => void) {
 		super(app);
@@ -55,10 +56,7 @@ export class ImageBatchRenameModal extends Modal {
 			.setDesc('Please input the name pattern to match files (regex)')
 			.addText(text => text
 				.setValue(this.state.namePattern)
-				.onChange(async (value) => {
-					this.state.namePattern = value
-				}
-				))
+				.onChange(value => this.invalidateBatchInput('namePattern', value)))
 		const npInputEl = namePatternSetting.controlEl.children[0] as HTMLInputElement
 		npInputEl.focus()
 		const npInputState = lockInputMethodComposition(npInputEl)
@@ -79,10 +77,7 @@ export class ImageBatchRenameModal extends Modal {
 			.setDesc('Please input the extension pattern to match files (regex)')
 			.addText(text => text
 				.setValue(this.state.extPattern)
-				.onChange(async (value) => {
-					this.state.extPattern = value
-				}
-				))
+				.onChange(value => this.invalidateBatchInput('extPattern', value)))
 		const extInputEl = extPatternSetting.controlEl.children[0] as HTMLInputElement
 		extInputEl.addEventListener('keydown', async (e) => {
 			if (e.key === 'Enter') {
@@ -96,10 +91,7 @@ export class ImageBatchRenameModal extends Modal {
 			.setDesc('Please input the string to replace the matched name (use $1, $2 for regex groups)')
 			.addText(text => text
 				.setValue(this.state.nameReplace)
-				.onChange(async (value) => {
-					this.state.nameReplace = value
-				}
-				))
+				.onChange(value => this.invalidateBatchInput('nameReplace', value)))
 
 		const nrInputEl = nameReplaceSetting.controlEl.children[0] as HTMLInputElement
 		const nrInputState = lockInputMethodComposition(nrInputEl)
@@ -141,6 +133,7 @@ export class ImageBatchRenameModal extends Modal {
 			]
 		})
 		const tbodyEl = tableET.children[1].el
+		this.resultsTbodyEl = tbodyEl
 
 		const errorEl = contentEl.createDiv({
 			cls: 'error',
@@ -184,9 +177,18 @@ export class ImageBatchRenameModal extends Modal {
 		invalidateBatchScan(this.scanState)
 		this.requestErrorEl = null
 		this.renameAllButtonEl = null
+		this.resultsTbodyEl = null
 		const { contentEl } = this;
 		contentEl.empty();
 		this.onCloseExtra()
+	}
+
+	invalidateBatchInput(field: 'namePattern' | 'extPattern' | 'nameReplace', value: string) {
+		this.state[field] = value
+		supersedeBatchScan(this.scanState)
+		this.state.renameTasks = []
+		this.resultsTbodyEl?.empty()
+		if (this.renameAllButtonEl) this.renameAllButtonEl.disabled = true
 	}
 
 	reportMatchError(message: string, error: unknown) {
@@ -214,10 +216,14 @@ export class ImageBatchRenameModal extends Modal {
 			this.requestErrorEl.innerText = ''
 			this.requestErrorEl.style.display = 'none'
 		}
-		const state = { ...this.state }
+		const state: BatchScanInput = {
+			namePattern: this.state.namePattern,
+			extPattern: this.state.extPattern,
+			nameReplace: this.state.nameReplace,
+		}
 		try {
 			const groups = await this.scanFunc()
-			if (!isCurrentBatchScan(this.scanState, token) || !groups) return
+			if (!isCurrentBatchScan(this.scanState, token) || !groups || !isCurrentBatchScanInput(state, this.state)) return
 
 			const namePatternRegex = new RegExp(state.namePattern, 'g')
 			const extPatternRegex = new RegExp(state.extPattern)
@@ -294,7 +300,7 @@ export class ImageBatchRenameModal extends Modal {
 				this.state.renameTasks = renameTasks
 			}
 		} catch (error) {
-			if (!isCurrentBatchScan(this.scanState, token)) return
+			if (!isCurrentBatchScan(this.scanState, token) || !isCurrentBatchScanInput(state, this.state)) return
 			this.state.renameTasks = []
 			if (this.renameAllButtonEl) this.renameAllButtonEl.disabled = true
 			tbodyEl.empty()

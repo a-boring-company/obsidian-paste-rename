@@ -5,6 +5,12 @@ export interface BatchScanState {
 	ready: boolean
 }
 
+export interface BatchScanInput {
+	namePattern: string
+	extPattern: string
+	nameReplace: string
+}
+
 export function createBatchScanState(): BatchScanState {
 	return { request: createLatestRequestState(), ready: false }
 }
@@ -28,6 +34,17 @@ export function invalidateBatchScan(state: BatchScanState): void {
 	invalidateLatestRequest(state.request)
 }
 
+export function supersedeBatchScan(state: BatchScanState): void {
+	state.ready = false
+	beginLatestRequest(state.request)
+}
+
 export function isCurrentBatchScan(state: BatchScanState, token: number): boolean {
 	return isLatestRequest(state.request, token)
+}
+
+export function isCurrentBatchScanInput(captured: BatchScanInput, current: BatchScanInput): boolean {
+	return captured.namePattern === current.namePattern
+		&& captured.extPattern === current.extPattern
+		&& captured.nameReplace === current.nameReplace
 }

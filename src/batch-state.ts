@@ -19,6 +19,10 @@ export function createBatchChoiceState(tasks: BatchRenameTask[]): BatchChoiceSta
 	return { remaining: [...tasks] }
 }
 
+export function shouldAutoRename(autoRename: boolean, isMeaningful: boolean): boolean {
+	return autoRename && isMeaningful
+}
+
 export function applyBatchChoice(
 	state: BatchChoiceState,
 	choice: BatchChoice,
