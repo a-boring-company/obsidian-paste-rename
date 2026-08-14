@@ -1,4 +1,4 @@
-export type ImageOutput = 'html' | 'markdown'
+type ImageOutput = 'html' | 'markdown'
 
 export function resolveImageOutput(stored: unknown, fallback: ImageOutput): ImageOutput {
 	if (stored === null || stored === undefined) return fallback

@@ -11,10 +11,6 @@ export function extractGeneratedDestination(link: string): string | null {
 	return null
 }
 
-export function imageLinkText(link: string): string {
-	return link.startsWith('!') ? link : `!${link}`
-}
-
 export function attachmentTargetPathGroups(
 	sourceNotePath: string,
 	previousPath: string,

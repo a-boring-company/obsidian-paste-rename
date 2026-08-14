@@ -1,6 +1,6 @@
 import { AttachmentTypeConfig, cloneAttachmentTypeConfig } from './attachment-types'
 
-export interface AttachmentTypePersistence {
+interface AttachmentTypePersistence {
 	current: AttachmentTypeConfig
 	committed: AttachmentTypeConfig
 	revision: number

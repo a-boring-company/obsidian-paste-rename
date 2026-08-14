@@ -1,26 +1,22 @@
-export interface BatchRenameTask {
+interface BatchRenameTask {
 	id: string
 	proposedName: string
 }
 
-export type BatchChoice = 'rename' | 'cancel'
+type BatchChoice = 'rename' | 'cancel'
 
-export interface BatchDecision {
+interface BatchDecision {
 	id: string
 	action: BatchChoice
 	name: string
 }
 
-export interface BatchChoiceState {
+interface BatchChoiceState {
 	remaining: BatchRenameTask[]
 }
 
 export function createBatchChoiceState(tasks: BatchRenameTask[]): BatchChoiceState {
 	return { remaining: [...tasks] }
-}
-
-export function shouldAutoRename(autoRename: boolean, isMeaningful: boolean): boolean {
-	return autoRename && isMeaningful
 }
 
 export function applyBatchChoice(

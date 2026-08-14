@@ -2,7 +2,7 @@ import type { TFile, Vault } from 'obsidian'
 
 type VaultProcessAdapter = Pick<Vault, 'process'>
 
-export type VaultCompareWriteResult = 'written' | 'conflict' | 'cancelled'
+type VaultCompareWriteResult = 'written' | 'conflict' | 'cancelled'
 
 export async function compareAndWriteVaultText(
 	vault: VaultProcessAdapter,

@@ -1,4 +1,4 @@
-export interface EmbedPath {
+interface EmbedPath {
 	kind: 'wiki' | 'markdown'
 	path: string
 }

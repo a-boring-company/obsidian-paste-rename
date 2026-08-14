@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-	BUILTIN_ATTACHMENT_EXTENSIONS,
-	BUILTIN_IMAGE_EXTENSIONS,
 	DEFAULT_ATTACHMENT_TYPE_CONFIG,
 	isEligibleAttachmentExtension,
 	parseAttachmentTypeConfig,
@@ -13,18 +11,16 @@ import {
 
 describe('attachment type configuration', () => {
 	it('contains the complete built-in image and attachment sets', () => {
-		expect(BUILTIN_IMAGE_EXTENSIONS).toEqual([
-			'avif', 'bmp', 'gif', 'heic', 'heif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp',
-		])
-		expect(BUILTIN_ATTACHMENT_EXTENSIONS).toEqual([
-			'aac', 'avi', 'bz2', 'csv', 'doc', 'docx', 'epub', 'flac', 'gz', 'key', 'm4a', 'm4v', 'mkv', 'mobi',
-			'mov', 'mp3', 'mp4', 'mpeg', 'mpg', 'numbers', 'odp', 'ods', 'odt', 'oga', 'ogg', 'ogv', 'opus',
-			'pages', 'pdf', 'ppt', 'pptx', 'rar', 'rtf', 'tar', 'tbz2', 'tgz', 'txt', 'txz', 'wav', 'webm', 'xls',
-			'xlsx', 'xz', '7z', 'zip',
-		])
 		expect(DEFAULT_ATTACHMENT_TYPE_CONFIG).toEqual({
-			images: BUILTIN_IMAGE_EXTENSIONS,
-			attachments: BUILTIN_ATTACHMENT_EXTENSIONS,
+			images: [
+				'avif', 'bmp', 'gif', 'heic', 'heif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp',
+			],
+			attachments: [
+				'aac', 'avi', 'bz2', 'csv', 'doc', 'docx', 'epub', 'flac', 'gz', 'key', 'm4a', 'm4v', 'mkv', 'mobi',
+				'mov', 'mp3', 'mp4', 'mpeg', 'mpg', 'numbers', 'odp', 'ods', 'odt', 'oga', 'ogg', 'ogv', 'opus',
+				'pages', 'pdf', 'ppt', 'pptx', 'rar', 'rtf', 'tar', 'tbz2', 'tgz', 'txt', 'txz', 'wav', 'webm', 'xls',
+				'xlsx', 'xz', '7z', 'zip',
+			],
 		})
 	})
 

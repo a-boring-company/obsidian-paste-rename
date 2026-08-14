@@ -104,7 +104,7 @@ function rangesOverlap(start: number, end: number, otherStart: number, otherEnd:
 	return start < otherEnd && otherStart < end
 }
 
-export interface RetargetDestinations {
+interface RetargetDestinations {
 	wiki: string
 	markdown: string
 }

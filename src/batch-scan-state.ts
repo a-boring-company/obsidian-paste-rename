@@ -1,7 +1,6 @@
-import { beginLatestRequest, createLatestRequestState, invalidateLatestRequest, isLatestRequest, LatestRequestState } from './latest-request'
-
 export interface BatchScanState {
-	request: LatestRequestState
+	token: number
+	closed: boolean
 	ready: boolean
 }
 
@@ -12,12 +11,13 @@ export interface BatchScanInput {
 }
 
 export function createBatchScanState(): BatchScanState {
-	return { request: createLatestRequestState(), ready: false }
+	return { token: 0, closed: false, ready: false }
 }
 
 export function beginBatchScan(state: BatchScanState): number {
 	state.ready = false
-	return beginLatestRequest(state.request)
+	state.token++
+	return state.token
 }
 
 export function publishBatchScan(state: BatchScanState, taskCount: number): boolean {
@@ -31,16 +31,17 @@ export function canRenameBatch(state: BatchScanState): boolean {
 
 export function invalidateBatchScan(state: BatchScanState): void {
 	state.ready = false
-	invalidateLatestRequest(state.request)
+	state.closed = true
+	state.token++
 }
 
 export function supersedeBatchScan(state: BatchScanState): void {
 	state.ready = false
-	beginLatestRequest(state.request)
+	state.token++
 }
 
 export function isCurrentBatchScan(state: BatchScanState, token: number): boolean {
-	return isLatestRequest(state.request, token)
+	return !state.closed && state.token === token
 }
 
 export function isCurrentBatchScanInput(captured: BatchScanInput, current: BatchScanInput): boolean {

@@ -1,29 +1,25 @@
-export const BUILTIN_IMAGE_EXTENSIONS = [
-	'avif', 'bmp', 'gif', 'heic', 'heif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp',
-] as const
-
-export const BUILTIN_ATTACHMENT_EXTENSIONS = [
-	'aac', 'avi', 'bz2', 'csv', 'doc', 'docx', 'epub', 'flac', 'gz', 'key', 'm4a', 'm4v', 'mkv', 'mobi',
-	'mov', 'mp3', 'mp4', 'mpeg', 'mpg', 'numbers', 'odp', 'ods', 'odt', 'oga', 'ogg', 'ogv', 'opus',
-	'pages', 'pdf', 'ppt', 'pptx', 'rar', 'rtf', 'tar', 'tbz2', 'tgz', 'txt', 'txz', 'wav', 'webm', 'xls',
-	'xlsx', 'xz', '7z', 'zip',
-] as const
-
 export interface AttachmentTypeConfig {
 	images: string[]
 	attachments: string[]
 }
 
 export const DEFAULT_ATTACHMENT_TYPE_CONFIG: AttachmentTypeConfig = {
-	images: [...BUILTIN_IMAGE_EXTENSIONS],
-	attachments: [...BUILTIN_ATTACHMENT_EXTENSIONS],
+	images: [
+		'avif', 'bmp', 'gif', 'heic', 'heif', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp',
+	],
+	attachments: [
+		'aac', 'avi', 'bz2', 'csv', 'doc', 'docx', 'epub', 'flac', 'gz', 'key', 'm4a', 'm4v', 'mkv', 'mobi',
+		'mov', 'mp3', 'mp4', 'mpeg', 'mpg', 'numbers', 'odp', 'ods', 'odt', 'oga', 'ogg', 'ogv', 'opus',
+		'pages', 'pdf', 'ppt', 'pptx', 'rar', 'rtf', 'tar', 'tbz2', 'tgz', 'txt', 'txz', 'wav', 'webm', 'xls',
+		'xlsx', 'xz', '7z', 'zip',
+	],
 }
 
 export function cloneAttachmentTypeConfig(config: AttachmentTypeConfig): AttachmentTypeConfig {
 	return { images: [...config.images], attachments: [...config.attachments] }
 }
 
-export type AttachmentTypeConfigResult =
+type AttachmentTypeConfigResult =
 	| { ok: true; value: AttachmentTypeConfig }
 	| { ok: false; error: string }
 

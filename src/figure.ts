@@ -1,10 +1,10 @@
-export interface FigureOptions {
+interface FigureOptions {
 	src: string
 	stem: string
 	width?: number
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
 	return value
 		.replace(/&/g, '&amp;')
 		.replace(/</g, '&lt;')

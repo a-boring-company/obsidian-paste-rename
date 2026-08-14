@@ -2,7 +2,7 @@ import type { CachedMetadata } from 'obsidian'
 import { CachedEmbedOccurrence, replaceRetargetedCachedOccurrences } from './batch-occurrences'
 import { replaceGeneratedFigures } from './figure-document'
 
-export interface BatchMetadataLedgerEntry {
+interface BatchMetadataLedgerEntry {
 	fingerprint: string
 	cache: CachedMetadata
 }
@@ -157,7 +157,7 @@ export function hasBatchEditorOwnership<T, V>(
 		&& activeEditor === session.editor
 }
 
-export interface DocumentTextChange {
+interface DocumentTextChange {
 	from: { line: number; ch: number }
 	to: { line: number; ch: number }
 	text: string
@@ -175,7 +175,7 @@ export function batchDiskContentAllowed(content: string, baseline: string, nativ
 	return content === baseline || content === nativeCurrent
 }
 
-export type BatchCommitEditorState = 'captured' | 'committed' | 'drifted'
+type BatchCommitEditorState = 'captured' | 'committed' | 'drifted'
 
 export function batchCommitEditorState(capturedContent: string, committedContent: string, editorContent: string): BatchCommitEditorState {
 	if (editorContent === committedContent) return 'committed'

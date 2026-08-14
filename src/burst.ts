@@ -1,4 +1,4 @@
-export interface BurstCancellation {
+interface BurstCancellation {
 	cancelled: boolean
 	generation: number
 }

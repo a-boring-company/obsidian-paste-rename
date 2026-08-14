@@ -10,7 +10,7 @@ import { replaceAttachmentReference } from '../src/attachment-reference'
 	describe('anchored embed replacement', () => {
 	it('searches a bounded text window and returns exact multiline coordinates', () => {
 		const lines = ['first', 'before ![[image.png]] after', 'third', '![[image.png]]']
-		const edit = replaceNearCursorInText({ line: 0, ch: 20 }, lines.length, (content, cursor) => {
+		const edit = replaceNearCursorInText({ line: 0, ch: 20 }, lines.length, content => {
 			const start = content.indexOf('![[image.png]]')
 			if (start < 0) return null
 			return { text: `${content.slice(0, start)}<figure>\n</figure>${content.slice(start + 14)}`, start, end: start + 14, replacementText: '<figure>\n</figure>' }
@@ -22,7 +22,7 @@ import { replaceAttachmentReference } from '../src/attachment-reference'
 		expect(replaceNearCursorInText({ line: 0, ch: 0 }, 0, () => null, () => '')).toBeNull()
 		expect(replaceNearCursorInText({ line: 0, ch: 0 }, 1, () => ({ text: 'same', start: 0, end: 0, matched: true }), () => 'same')?.matched).toBe(true)
 		const farAway = Array.from({ length: 21 }, (_, index) => index === 20 ? '![[image.png]]' : `line ${index}`)
-		expect(replaceNearCursorInText({ line: 0, ch: 0 }, farAway.length, (content, cursor) => content.includes('![[image.png]]') ? { text: content, start: 0, end: 0, matched: true } : null, line => farAway[line])).toBeNull()
+		expect(replaceNearCursorInText({ line: 0, ch: 0 }, farAway.length, content => content.includes('![[image.png]]') ? { text: content, start: 0, end: 0, matched: true } : null, line => farAway[line])).toBeNull()
 		const continuation = Array.from({ length: 10 }, (_, index) => index === 9 ? 'outside' : `line ${index}`)
 		expect(replaceNearCursorInText({ line: 0, ch: 0 }, continuation.length, (content) => ({ text: 'changed', start: content.indexOf('outside'), end: content.indexOf('outside') + 7, replacementText: 'changed' }), line => continuation[line])).toBeNull()
 	})
@@ -41,7 +41,7 @@ import { replaceAttachmentReference } from '../src/attachment-reference'
 			const pending = embeds.map((embed, id) => ({ id: `${id}`, path: embed.slice(3, -2) }))
 			const editOne = (pendingItem: typeof pending[number]) => {
 				const cursor = cursors[Number(pendingItem.id)]
-				const edit = replaceNearCursorInText(cursor, lines.length, (content, ch) => {
+				const edit = replaceNearCursorInText(cursor, lines.length, content => {
 					const marker = `![[${pendingItem.path}]]`
 					const start = content.indexOf(marker)
 					if (start < 0) return null

@@ -5,7 +5,7 @@ import {
 	parseAttachmentTypeConfig,
 } from './attachment-types'
 
-export interface AttachmentTypeFileSelection {
+interface AttachmentTypeFileSelection {
 	config: AttachmentTypeConfig
 	createUserFile: boolean
 	invalidUserFile: boolean

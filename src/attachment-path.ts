@@ -49,7 +49,3 @@ export function renameInPlace(currentPath: string, newFilename: string): string 
 	const parent = current.includes('/') ? current.slice(0, current.lastIndexOf('/')) : ''
 	return parent ? `${parent}/${newFilename}` : newFilename
 }
-
-export function isRenameNoOp(currentName: string, normalizedName: string): boolean {
-	return currentName === normalizedName
-}

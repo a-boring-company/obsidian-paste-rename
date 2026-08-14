@@ -5,6 +5,7 @@ import { beginBatchScan, canRenameBatch, createBatchScanState, invalidateBatchSc
 describe('batch scan state', () => {
 	it('clears readiness for a new scan and publishes only the winning result', () => {
 		const state = createBatchScanState()
+		expect(state).toEqual({ token: 0, closed: false, ready: false })
 		const first = beginBatchScan(state)
 		expect(canRenameBatch(state)).toBe(false)
 		const second = beginBatchScan(state)
@@ -23,6 +24,8 @@ describe('batch scan state', () => {
 		invalidateBatchScan(state)
 		expect(canRenameBatch(state)).toBe(false)
 		expect(isCurrentBatchScan(state, token)).toBe(false)
+		const afterClose = beginBatchScan(state)
+		expect(isCurrentBatchScan(state, afterClose)).toBe(false)
 	})
 
 	it('rejects publishing a scan based on fields edited while it awaited', () => {

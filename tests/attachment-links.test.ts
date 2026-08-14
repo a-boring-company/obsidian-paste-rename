@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { attachmentTargetPathGroups, extractGeneratedDestination, imageLinkText } from '../src/attachment-links'
+import { attachmentTargetPathGroups, extractGeneratedDestination } from '../src/attachment-links'
 
 describe('generated attachment links', () => {
 	it('extracts destinations from wikilinks and non-embed generated links', () => {
@@ -9,11 +9,6 @@ describe('generated attachment links', () => {
 		expect(extractGeneratedDestination('[old.png](old.png)')).toBe('old.png')
 		expect(extractGeneratedDestination('old.png')).toBe('old.png')
 		expect(extractGeneratedDestination('')).toBeNull()
-	})
-
-	it('adds the image marker only when generated Markdown omitted it', () => {
-		expect(imageLinkText('![old.png](old.png)')).toBe('![old.png](old.png)')
-		expect(imageLinkText('[old.png](old.png)')).toBe('![old.png](old.png)')
 	})
 
 	it('derives old and current generated, relative, and vault-root candidates', () => {

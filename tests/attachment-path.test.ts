@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { attachmentPathCandidates, isRenameNoOp, relativeAttachmentPath, renameInPlace } from '../src/attachment-path'
+import { attachmentPathCandidates, relativeAttachmentPath, renameInPlace } from '../src/attachment-path'
 
 describe('attachment paths', () => {
 	it('provides generated, note-relative, and vault-root path candidates', () => {
@@ -14,11 +14,6 @@ describe('attachment paths', () => {
 	it('renames in the existing parent directory only', () => {
 		expect(renameInPlace('assets/original.png', 'renamed.png')).toBe('assets/renamed.png')
 		expect(renameInPlace('original.png', 'renamed.png')).toBe('renamed.png')
-	})
-
-	it('detects an already-normalized filename without treating it as a duplicate', () => {
-		expect(isRenameNoOp('image.png', 'image.png')).toBe(true)
-		expect(isRenameNoOp('image.png', 'image-1.png')).toBe(false)
 	})
 
 	it('computes a relative attachment path from the source note', () => {

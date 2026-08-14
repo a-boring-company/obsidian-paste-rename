@@ -12,13 +12,9 @@ export interface LineEdit extends LineReplacement {
 	endCh: number
 }
 
-export interface TextCursor {
+interface TextCursor {
 	line: number
 	ch: number
-}
-
-export interface TextReplacement extends LineReplacement {
-	matched?: boolean
 }
 
 export const BOUNDED_SEARCH_RADIUS = 8
@@ -42,7 +38,7 @@ function positionFromOffset(content: string, offset: number): TextCursor {
 export function replaceNearCursorInText(
 	cursor: TextCursor,
 	lineCount: number,
-	replacer: (content: string, cursor: number) => TextReplacement | null,
+	replacer: (content: string, cursor: number) => LineReplacement | null,
 	getLine: (line: number) => string,
 	radius = BOUNDED_SEARCH_RADIUS,
 ): LineEdit | null {

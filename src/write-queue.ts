@@ -1,4 +1,4 @@
-export interface SerializedWriteQueue<T> {
+interface SerializedWriteQueue<T> {
 	enqueue(value: T, write: (snapshot: T) => Promise<void>): Promise<void>
 }
 

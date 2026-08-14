@@ -3,7 +3,7 @@ import { LineReplacement } from './embed-location'
 import { findReferenceOccurrences, pathsEqual, ReferencePath } from './embeds'
 import { advanceMarkdownDocumentContext, emptyMarkdownDocumentContext, MarkdownDocumentContext } from './markdown-context'
 
-export interface AttachmentReferenceInput {
+interface AttachmentReferenceInput {
 	content: string
 	cursor: number
 	targetPaths: readonly string[]
@@ -16,7 +16,7 @@ export interface AttachmentReferenceInput {
 	initialContext?: MarkdownDocumentContext | null
 }
 
-export interface AttachmentReferenceStateInput {
+interface AttachmentReferenceStateInput {
 	content: string
 	cursor: number
 	targetPaths: readonly string[]
@@ -25,7 +25,7 @@ export interface AttachmentReferenceStateInput {
 }
 
 export type AttachmentReferenceState = 'old' | 'current' | 'none'
-export type NativeLinkSyncDecision = 'proceed' | 'wait' | 'abort'
+type NativeLinkSyncDecision = 'proceed' | 'wait' | 'abort'
 
 interface ReferenceCandidate {
 	start: number

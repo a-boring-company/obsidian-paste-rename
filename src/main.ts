@@ -26,11 +26,10 @@ import {
 import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
-import { observeAsyncCommand } from './async-command';
-import { applyBatchChoice, createBatchChoiceState, shouldAutoRename } from './batch-state';
+import { applyBatchChoice, createBatchChoiceState } from './batch-state';
 import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent } from './batch-content';
-import { attachmentTargetPathGroups, extractGeneratedDestination, imageLinkText } from './attachment-links';
-import { isRenameNoOp, relativeAttachmentPath, renameInPlace } from './attachment-path';
+import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
+import { relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
 import { CachedAttachmentGroup, CachedEmbedOccurrence, attachmentTargetDiscovered, cacheEmbedOccurrences, cacheReferenceOccurrences, deriveRetargetDestinations, groupCachedAttachments, retargetCachedOccurrences } from './batch-occurrences';
 import { AttachmentTypeUserSource, chooseAttachmentTypeConfig } from './attachment-type-files';
@@ -212,13 +211,10 @@ export default class PasteRenamePlugin extends Plugin {
 		}
 
 		const batchRenameAllImages = () => {
-			void observeAsyncCommand(
-				() => this.batchRenameAllImages(),
-				error => {
-					console.error('Could not batch rename images', error)
-					new Notice('Could not batch rename images')
-				},
-			)
+			void this.batchRenameAllImages().catch(error => {
+				console.error('Could not batch rename images', error)
+				new Notice('Could not batch rename images')
+			})
 		}
 		this.addCommand({
 			id: 'batch-rename-all-images',
@@ -283,7 +279,7 @@ export default class PasteRenamePlugin extends Plugin {
 			if (!this.isCurrent(generation)) return
 			const current = taskById.get(state.remaining[0].id)
 			if (!current) break
-			if (shouldAutoRename(current.autoRename, current.isMeaningful)) {
+			if (current.autoRename && current.isMeaningful) {
 				const result = applyBatchChoice(state, 'rename', { name: current.proposedName })
 				await this.applyRenameDecisions(result.decisions, taskById, generation)
 				state = result.state
@@ -341,7 +337,7 @@ export default class PasteRenamePlugin extends Plugin {
 		}
 		const normalizedName = suffix ? `${normalizedStem}${suffix}` : normalizedStem
 		const originName = file.name
-		const noOp = isRenameNoOp(originName, normalizedName)
+		const noOp = originName === normalizedName
 		// deduplicate name
 		const { name: newName } = noOp ? { name: normalizedName } : await this.deduplicateNewName(normalizedName, file)
 		if (!this.isCurrent(generation)) return { success: false, edit: null }
@@ -455,7 +451,7 @@ export default class PasteRenamePlugin extends Plugin {
 		const targetPaths = targetGroups.old
 		const image = isImageExtension(file.extension, this.attachmentTypes)
 		const asFigure = image && this.settings.imageOutput === 'html'
-		const desiredLinkText = image ? imageLinkText(newLinkText) : newLinkText
+		const desiredLinkText = image && !newLinkText.startsWith('!') ? `!${newLinkText}` : newLinkText
 		const replacementPath = extractGeneratedDestination(newLinkText) ?? currentPath
 		const replacement = asFigure
 			? renderFigure({ src: currentPath, stem: file.basename, width: this.settings.imageWidth })
