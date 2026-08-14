@@ -13,7 +13,7 @@ function decodeHtmlAttribute(value: string): string {
 	return value.replace(/&(amp|lt|gt|quot|#39);/g, (_, entity: string) => entities[entity])
 }
 
-export function decodeGeneratedFigureSource(value: string): string | null {
+function decodeGeneratedFigureSource(value: string): string | null {
 	try {
 		return decodeURIComponent(decodeHtmlAttribute(value))
 	} catch {
