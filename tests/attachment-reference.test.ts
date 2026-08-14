@@ -110,6 +110,14 @@ describe('attachment reference replacement', () => {
 		expect(result?.text).toBe('- before ![[new.png]] after')
 	})
 
+	it('terminates a generated figure before a following Markdown embed', () => {
+		const result = replaceAttachmentReference({
+			content: '![[old.png]]\n![[doc.pdf]]', cursor: 5, targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})
+		expect(result?.text).toBe('<figure>new</figure>\n\n![[doc.pdf]]')
+	})
+
 	it('preserves the image marker in Markdown mode when alwaysUpdateLinks is false', () => {
 		const result = replaceAttachmentReference({
 			content: '![old.png](old.png)', cursor: 10, targetPaths: ['old.png', '../old.png', '/old.png'],

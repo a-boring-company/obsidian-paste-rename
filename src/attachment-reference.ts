@@ -129,7 +129,7 @@ function canRenderTopLevelFigure(content: string, candidate: ReferenceCandidate,
 function replaceCandidate(content: string, candidate: ReferenceCandidate, replacement: string): LineReplacement {
 	const before = content.slice(0, candidate.start)
 	const after = content.slice(candidate.end)
-	const suffix = after && !after.startsWith('\n') ? '\n' : ''
+	const suffix = after ? '\n' : ''
 	const replacementText = `${replacement}${suffix}`
 	return {
 		text: `${before}${replacementText}${after}`,
