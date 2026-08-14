@@ -21,6 +21,8 @@ export interface TextReplacement extends LineReplacement {
 	matched?: boolean
 }
 
+export const BOUNDED_SEARCH_RADIUS = 8
+
 function lineStartOffsets(lines: readonly string[]): number[] {
 	const offsets: number[] = []
 	let offset = 0
@@ -42,7 +44,7 @@ export function replaceNearCursorInText(
 	lineCount: number,
 	replacer: (content: string, cursor: number) => TextReplacement | null,
 	getLine: (line: number) => string,
-	radius = 8,
+	radius = BOUNDED_SEARCH_RADIUS,
 ): LineEdit | null {
 	if (lineCount <= 0) return null
 	const line = Math.max(0, Math.min(cursor.line, lineCount - 1))

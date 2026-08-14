@@ -1,15 +1,74 @@
 import { describe, expect, it } from 'vitest'
 
-import { replaceAttachmentReference } from '../src/attachment-reference'
+import { classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from '../src/attachment-reference'
+import { markdownDocumentContextBefore } from '../src/markdown-context'
 
 describe('attachment reference replacement', () => {
+	it('classifies the anchored reference as old, current, or absent', () => {
+		expect(classifyAttachmentReference({
+			content: '![[old.png]]', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], image: true,
+		})).toBe('old')
+		expect(classifyAttachmentReference({
+			content: '![[new.png]]', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], image: true,
+		})).toBe('current')
+		expect(classifyAttachmentReference({
+			content: '![[new.pdf]]', cursor: 5, targetPaths: ['old.pdf'], currentTargetPaths: ['new.pdf'], image: false,
+		})).toBe('current')
+		expect(classifyAttachmentReference({
+			content: 'no matching reference', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], image: true,
+		})).toBe('none')
+	})
+
+	it('allows only proven disk states to proceed after native rename', () => {
+		expect(nativeLinkSyncDecision('current', 'old')).toBe('wait')
+		expect(nativeLinkSyncDecision('current', 'none')).toBe('wait')
+		expect(nativeLinkSyncDecision('current', 'current')).toBe('proceed')
+		expect(nativeLinkSyncDecision('old', 'old')).toBe('proceed')
+		expect(nativeLinkSyncDecision('none', 'current')).toBe('abort')
+		expect(nativeLinkSyncDecision(null, 'old')).toBe('abort')
+	})
+
 	it('manually converts an old wikilink to HTML when alwaysUpdateLinks is false', () => {
 		const result = replaceAttachmentReference({
 			content: 'before ![[old.png]] after', cursor: 18,
 			targetPaths: ['old.png', '../assets/old.png', '/assets/old.png', 'new.png'],
-			replacement: '<figure>new</figure>', image: true, asFigure: true,
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
 		})
-		expect(result?.text).toBe('before \n<figure>new</figure>\n after')
+		expect(result?.text).toBe('before ![[new.png]] after')
+	})
+
+	it('keeps Markdown containers while updating only their exact destination', () => {
+		const replacement = '<figure>\n<img src="new.png">\n</figure>'
+		const replace = (content: string) => replaceAttachmentReference({
+			content, cursor: Math.max(0, content.indexOf('old.png')), targetPaths: ['old.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.text
+		expect(replace('> ![[old.png]]')).toBe('> ![[new.png]]')
+		expect(replace('- ![[old.png]]')).toBe('- ![[new.png]]')
+		expect(replace('12. ![[old.png]]')).toBe('12. ![[new.png]]')
+		expect(replace('> - ![[old.png]]')).toBe('> - ![[new.png]]')
+		expect(replace('> > ![[old.png]]')).toBe('> > ![[new.png]]')
+		expect(replace('    ![[old.png]]')).toBe('    ![[new.png]]')
+		expect(replace('```\n![[old.png]]\n```')).toBe('```\n![[new.png]]\n```')
+		expect(replace('- ![Alt](old.png "Title")')).toBe('- ![Alt](new.png "Title")')
+		expect(replace('> ![[old.png|Report]]')).toBe('> ![[new.png|Report]]')
+		expect(replace('- before ![[old.png|Report]] after')).toBe('- before ![[new.png|Report]] after')
+		expect(replaceAttachmentReference({
+			content: '- ![[new.png|Report]]', cursor: 8, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
+			replacement, replacementPath: 'new.png', image: true, asFigure: true,
+		})?.matched).toBe(true)
+		expect(replaceAttachmentReference({
+			content: '> ![Alt](new.png "Title")', cursor: 8, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
+			replacement, replacementPath: 'new.png', image: true, asFigure: true,
+		})?.matched).toBe(true)
+	})
+
+	it('keeps trailing same-line content in the list container', () => {
+		const result = replaceAttachmentReference({
+			content: '- before ![[old.png]] after', cursor: 12, targetPaths: ['old.png'],
+			replacement: '<figure>\n<img src="new.png">\n</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})
+		expect(result?.text).toBe('- before ![[new.png]] after')
 	})
 
 	it('preserves the image marker in Markdown mode when alwaysUpdateLinks is false', () => {
@@ -112,6 +171,97 @@ describe('attachment reference replacement', () => {
 		})).toBeNull()
 	})
 
+	it('updates an indented candidate without converting it to HTML', () => {
+		const content = '    - ![[old.png]]'
+		expect(replaceAttachmentReference({
+			content, cursor: content.indexOf('!'), targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})?.text).toBe('    - ![[new.png]]')
+	})
+
+	it('converts a top-level embed after a closed fence', () => {
+		const content = '```\ncode\n```\n![[old.png]]'
+		const result = replaceAttachmentReference({
+			content, cursor: content.indexOf('old.png'), targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', image: true, asFigure: true,
+		})
+		expect(result?.text).toBe('```\ncode\n```\n<figure>new</figure>')
+	})
+
+	it('keeps frontmatter and multiline comment references as Markdown', () => {
+		const replacement = '<figure>new</figure>'
+		expect(replaceAttachmentReference({
+			content: '---\n![[old.png]]\n---', cursor: 9, targetPaths: ['old.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.text).toBe('---\n![[new.png]]\n---')
+		expect(replaceAttachmentReference({
+			content: '<!--\n![[old.png]]\n-->', cursor: 9, targetPaths: ['old.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.text).toBe('<!--\n![[new.png]]\n-->')
+		expect(replaceAttachmentReference({
+			content: '---\n![[new.png|Report]]\n---', cursor: 9, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.matched).toBe(true)
+		expect(replaceAttachmentReference({
+			content: '<!--\n![Alt](new.png "Title")\n-->', cursor: 10, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.matched).toBe(true)
+	})
+
+	it('carries frontmatter and comment context into a bounded slice', () => {
+		const replacement = '<figure>new</figure>'
+		const frontmatter = markdownDocumentContextBefore(['---', ...Array.from({ length: 8 }, (_, index) => `meta: ${index}`)])
+		const comment = markdownDocumentContextBefore(['<!--', ...Array.from({ length: 8 }, (_, index) => `comment ${index}`)])
+		expect(replaceAttachmentReference({
+			content: '![[old.png]]', cursor: 3, initialContext: frontmatter, targetPaths: ['old.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.text).toBe('![[new.png]]')
+		expect(replaceAttachmentReference({
+			content: '![[new.png|Report]]', cursor: 3, initialContext: comment, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.matched).toBe(true)
+		const fenced = markdownDocumentContextBefore(['```html <!-- -->', ...Array.from({ length: 8 }, (_, index) => `line ${index}`)])
+		expect(replaceAttachmentReference({
+			content: '![[old.png]]', cursor: 3, initialContext: fenced, targetPaths: ['old.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.text).toBe('![[new.png]]')
+		expect(replaceAttachmentReference({
+			content: '![[new.png|Report]]', cursor: 3, initialContext: fenced, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], replacement,
+			replacementPath: 'new.png', image: true, asFigure: true,
+		})?.matched).toBe(true)
+	})
+
+	it('keeps trailing top-level content below a block figure', () => {
+		const result = replaceAttachmentReference({
+			content: '![[old.png]] after', cursor: 5, targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})
+		expect(result?.text).toBe('<figure>new</figure>\n after')
+	})
+
+	it('uses the preceding fence state for bounded old and current references', () => {
+		const initialContext = markdownDocumentContextBefore(['```html', ...Array.from({ length: 8 }, (_, index) => `line ${index}`)])
+		const old = replaceAttachmentReference({
+			content: '![[old.png]]', cursor: 3, initialContext, targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})
+		const current = replaceAttachmentReference({
+			content: '![[new.png|Report]]', cursor: 3, initialContext, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})
+		expect(old?.text).toBe('![[new.png]]')
+		expect(current).toEqual({ text: '![[new.png|Report]]', start: 0, end: 19, matched: true })
+	})
+
+	it('converts a bounded candidate after the preceding fence closes', () => {
+		const initialContext = markdownDocumentContextBefore(['```html', ...Array.from({ length: 8 }, (_, index) => `line ${index}`)])
+		const result = replaceAttachmentReference({
+			content: '```\n![[old.png]]', cursor: 7, initialContext, targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', image: true, asFigure: true,
+		})
+		expect(result?.text).toBe('```\n<figure>new</figure>')
+	})
+
 	it('replaces only the anchored destination while preserving aliases, labels, and titles', () => {
 		expect(replaceAttachmentReference({
 			content: '[[old.pdf|Report]] [[new.pdf|Unrelated]]', cursor: 5, targetPaths: ['old.pdf'],
@@ -137,7 +287,7 @@ describe('attachment reference replacement', () => {
 			targetPaths: ['old.png'], currentTargetPaths: ['new.png'], replacement: '<figure>old</figure>',
 			replacementPath: 'new.png', image: true, asFigure: true, figureImageLine: '<img src="new.png" alt="new">',
 		})
-		expect(figure?.text).toBe('<img src="new.png" alt="new"> \n<figure>old</figure>')
+		expect(figure?.text).toBe('<img src="new.png" alt="new"> ![[new.png]]')
 		const overlapping = replaceAttachmentReference({
 			content: '[[new.pdf]]', cursor: 0, targetPaths: ['new.pdf'], currentTargetPaths: ['new.pdf'],
 			replacement: 'other.pdf', replacementPath: 'other.pdf', image: false, asFigure: false,

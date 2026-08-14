@@ -5,7 +5,7 @@
 	"main": "main.js",
 	"scripts": {
 		"start": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && BUILD_ENV=production node esbuild.config.mjs && cp manifest.json attachment-types.json build",
+		"build": "tsc -noEmit -skipLibCheck && BUILD_ENV=production node esbuild.config.mjs && cp manifest.json attachment-types.default.json build && rm -f build/attachment-types.json",
 		"lint": "npm exec -- eslint src tests --ext .ts",
 		"typecheck": "tsc --noEmit --skipLibCheck",
 		"test": "vitest run",

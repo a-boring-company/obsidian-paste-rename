@@ -1,6 +1,7 @@
 import { extractGeneratedDestination } from './attachment-links'
 import { LineReplacement } from './embed-location'
 import { findReferenceOccurrences, pathsEqual, ReferencePath } from './embeds'
+import { advanceMarkdownDocumentContext, emptyMarkdownDocumentContext, MarkdownDocumentContext } from './markdown-context'
 
 export interface AttachmentReferenceInput {
 	content: string
@@ -12,7 +13,19 @@ export interface AttachmentReferenceInput {
 	image: boolean
 	asFigure: boolean
 	figureImageLine?: string
+	initialContext?: MarkdownDocumentContext | null
 }
+
+export interface AttachmentReferenceStateInput {
+	content: string
+	cursor: number
+	targetPaths: readonly string[]
+	currentTargetPaths?: readonly string[]
+	image: boolean
+}
+
+export type AttachmentReferenceState = 'old' | 'current' | 'none'
+export type NativeLinkSyncDecision = 'proceed' | 'wait' | 'abort'
 
 interface ReferenceCandidate {
 	start: number
@@ -28,7 +41,11 @@ function distanceFromCandidate(position: number, candidate: ReferenceCandidate):
 	return 0
 }
 
-function nearestCandidate(content: string, cursor: number, input: AttachmentReferenceInput): ReferenceCandidate | null {
+function nearestCandidate(
+	content: string,
+	cursor: number,
+	input: Pick<AttachmentReferenceInput, 'targetPaths' | 'currentTargetPaths' | 'image' | 'asFigure' | 'figureImageLine'>,
+): ReferenceCandidate | null {
 	const candidates: ReferenceCandidate[] = findReferenceOccurrences(content)
 		.filter(reference => input.image ? reference.image : true)
 		.map(reference => ({
@@ -56,12 +73,49 @@ function nearestCandidate(content: string, cursor: number, input: AttachmentRefe
 	})
 }
 
-function replaceCandidate(content: string, candidate: ReferenceCandidate, replacement: string, block: boolean): LineReplacement {
+export function classifyAttachmentReference(input: AttachmentReferenceStateInput): AttachmentReferenceState {
+	const candidate = nearestCandidate(input.content, input.cursor, {
+		targetPaths: input.targetPaths,
+		currentTargetPaths: input.currentTargetPaths,
+		image: input.image,
+		asFigure: false,
+		figureImageLine: undefined,
+	})
+	if (!candidate) return 'none'
+	if (candidate.current && !candidate.old) return 'current'
+	return 'old'
+}
+
+export function nativeLinkSyncDecision(
+	diskState: AttachmentReferenceState | null,
+	editorState: AttachmentReferenceState,
+): NativeLinkSyncDecision {
+	if (diskState === 'old') return 'proceed'
+	if (diskState === 'current') return editorState === 'current' ? 'proceed' : 'wait'
+	return 'abort'
+}
+
+function isInsideExcludedContext(
+	content: string,
+	position: number,
+	initialContext: MarkdownDocumentContext | null = null,
+): boolean {
+	const lines = content.slice(0, position).split(/\r?\n/)
+	let context = initialContext ?? emptyMarkdownDocumentContext()
+	for (const line of lines) context = advanceMarkdownDocumentContext(context, line)
+	return context.fence !== null || context.frontmatter || context.comment
+}
+
+function canRenderTopLevelFigure(content: string, candidate: ReferenceCandidate, initialContext: MarkdownDocumentContext | null): boolean {
+	const lineStart = content.lastIndexOf('\n', candidate.start - 1) + 1
+	return candidate.start === lineStart && !isInsideExcludedContext(content, candidate.start, initialContext)
+}
+
+function replaceCandidate(content: string, candidate: ReferenceCandidate, replacement: string): LineReplacement {
 	const before = content.slice(0, candidate.start)
 	const after = content.slice(candidate.end)
-	const prefix = block && before && !before.endsWith('\n') ? '\n' : ''
-	const suffix = block && after && !after.startsWith('\n') ? '\n' : ''
-	const replacementText = `${prefix}${replacement}${suffix}`
+	const suffix = after && !after.startsWith('\n') ? '\n' : ''
+	const replacementText = `${replacement}${suffix}`
 	return {
 		text: `${before}${replacementText}${after}`,
 		start: candidate.start,
@@ -77,7 +131,8 @@ export function replaceAttachmentReference(input: AttachmentReferenceInput): Lin
 	if (!candidate.reference) return { text: input.content, start: candidate.start, end: candidate.end, matched: true }
 
 	const reference = candidate.reference
-	if (input.asFigure) return replaceCandidate(input.content, candidate, input.replacement, true)
+	const initialContext = input.initialContext ?? null
+	if (input.asFigure && canRenderTopLevelFigure(input.content, candidate, initialContext)) return replaceCandidate(input.content, candidate, input.replacement)
 	if (candidate.current && (!candidate.old || pathsEqual(reference.path, replacementPath))) {
 		return { text: input.content, start: candidate.start, end: candidate.end, matched: true }
 	}

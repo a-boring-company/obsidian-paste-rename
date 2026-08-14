@@ -68,4 +68,31 @@ describe('generated figure document replacement', () => {
 		].join('\n')
 		expect(replaceGeneratedFigures(document, 'assets/old.png', 'assets/new.png', 'old', 'new')).toBe(document)
 	})
+
+	it('ignores owned figures inside Markdown containers', () => {
+		const figure = renderFigure({ src: 'assets/old.png', stem: 'old' })
+		const quote = figure.split('\n').map(line => `> ${line}`).join('\n')
+		const list = figure.split('\n').map((line, index) => index === 0 ? `- ${line}` : `  ${line}`).join('\n')
+		const quoteList = figure.split('\n').map((line, index) => index === 0 ? `> - ${line}` : `>   ${line}`).join('\n')
+		const nestedList = ['- parent', ...figure.split('\n').map((line, index) => index === 0 ? `    - ${line}` : `      ${line}`), ...figure.split('\n').map((line, index) => index === 0 ? `    - ${line}` : `      ${line}`)].join('\n')
+		const nestedQuoteList = ['> - parent', ...figure.split('\n').map((line, index) => index === 0 ? `>     - ${line}` : `>       ${line}`)].join('\n')
+		const content = [quote, list, quoteList, nestedList, nestedQuoteList, list].join('\n')
+		expect(extractGeneratedFigurePaths(content)).toEqual([])
+		expect(replaceGeneratedFigures(content, 'assets/old.png', 'assets/new.png', 'old', 'new')).toBe(content)
+	})
+
+	it('does not discover supported-looking figures inside fenced code', () => {
+		const figure = renderFigure({ src: 'assets/old.png', stem: 'old' })
+		const quote = figure.split('\n').map(line => `> ${line}`).join('\n')
+		const fenced = ['```html', quote, '```'].join('\n')
+		expect(extractGeneratedFigurePaths(fenced)).toEqual([])
+	})
+
+	it('keeps comment-looking fence info strings fenced for discovery and replacement', () => {
+		const figure = renderFigure({ src: 'assets/old.png', stem: 'old' })
+		const fenced = ['```html <!-- -->', figure, '```', figure].join('\n')
+		const replacement = ['```html <!-- -->', figure, '```', renderFigure({ src: 'assets/new.png', stem: 'new' })].join('\n')
+		expect(extractGeneratedFigurePaths(fenced)).toEqual(['assets/old.png'])
+		expect(replaceGeneratedFigures(fenced, 'assets/old.png', 'assets/new.png', 'old', 'new')).toBe(replacement)
+	})
 })

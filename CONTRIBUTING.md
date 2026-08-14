@@ -28,7 +28,7 @@ OBSIDIAN_PLUGINS_DIR="/path/to/vault/.obsidian/plugins" npm start
 
 The hook installs the build into `.obsidian/plugins/paste-rename`.
 
-The build also installs `attachment-types.json`. Attachment files are renamed in place; no custom attachment directory is introduced.
+The build installs immutable `attachment-types.default.json`; the plugin creates or updates user-editable `attachment-types.json` in the installed plugin folder. Attachment files are renamed in place; no custom attachment directory is introduced.
 
 ## Validate
 

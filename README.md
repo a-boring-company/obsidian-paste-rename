@@ -12,7 +12,7 @@ Until the Community Plugins listing is updated, build and install from source:
 npm ci
 npm run build
 mkdir -p "/path/to/vault/.obsidian/plugins/paste-rename"
-cp build/main.js build/manifest.json build/styles.css build/attachment-types.json \
+cp build/main.js build/manifest.json build/styles.css build/attachment-types.default.json \
   "/path/to/vault/.obsidian/plugins/paste-rename/"
 ```
 
@@ -22,9 +22,11 @@ Reload Obsidian, then enable **Paste Rename** under **Settings > Community plugi
 
 Paste an image or an allowlisted attachment into an open Markdown note. Enter a filename without the extension, then press Enter. New installs use centered HTML figures for configured image types and handle all allowlisted attachments; existing saved settings are preserved. Set **Image output** to Markdown to keep Obsidian's generated links, or enable **Auto rename** to skip the prompt.
 
+HTML figures are emitted only for eligible column-zero/top-level image refs; container, indented, and fenced/code refs retain their existing Markdown/wiki syntax.
+
 The popup is shown once per file in a short create burst. **Apply to remaining files** keeps the current confirmed name for the current file and uses each remaining file's own generated default. Cancel leaves names unchanged. Files are renamed in their existing vault directory.
 
-The checked-in `attachment-types.json` is copied beside the plugin at build time. It contains editable `images` and `attachments` arrays. The settings tab provides comma-separated editors and **Reset defaults**; valid edits are written immediately. Missing or invalid manual JSON uses built-in defaults without overwriting the file. Unknown technical extensions and excluded extensions are ignored.
+The checked-in `attachment-types.default.json` contains immutable shipped defaults. On first load, Paste Rename creates the editable `attachment-types.json`; existing user configuration remains authoritative across plugin updates. The settings tab provides comma-separated editors and **Reset defaults**; valid edits are written immediately. Invalid manual JSON uses defaults without overwriting the file. Unknown technical extensions and excluded extensions are ignored.
 
 The default pattern is `{{fileName}}`. Available variables are:
 

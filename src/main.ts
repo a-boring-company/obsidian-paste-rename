@@ -28,8 +28,9 @@ import { observeAsyncCommand } from './async-command';
 import { applyBatchChoice, createBatchChoiceState } from './batch-state';
 import { attachmentTargetPathGroups, extractGeneratedDestination, imageLinkText } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
-import { replaceAttachmentReference } from './attachment-reference';
+import { AttachmentReferenceState, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
 import { collectBatchReferenceLinks } from './batch-references';
+import { AttachmentTypeUserSource, chooseAttachmentTypeConfig } from './attachment-type-files';
 import { replaceGeneratedFigures } from './figure-document';
 import { applyAttachmentTypeSnapshot, commitAttachmentTypeSnapshot, createAttachmentTypePersistence, reconcileAttachmentTypeFailure } from './attachment-type-state';
 import {
@@ -42,11 +43,13 @@ import {
 } from './attachment-types';
 import { cancelBurst, createBurstCancellation, isBurstCancelled } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
-import { LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
+import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
 import { renderFigure } from './figure';
 import { normalizeFilenameStem } from './filename';
+import { markdownDocumentContextBefore } from './markdown-context';
 import { retryBounded } from './retry';
 import { renderTemplate } from './template';
+import { updateVaultText } from './vault-text';
 import { createSerializedWriteQueue } from './write-queue';
 import {
   createElementTree,
@@ -88,7 +91,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 
 const PASTED_IMAGE_PREFIX = 'Pasted image '
 const CREATE_BURST_DELAY_MS = 100
-const FIGURE_RETRY_COUNT = 3
+const FIGURE_RETRY_COUNT = 5
 const FIGURE_RETRY_DELAY_MS = 50
 
 interface RenameRequest {
@@ -353,13 +356,61 @@ export default class PasteRenamePlugin extends Plugin {
 			oldLinkText,
 			newLinkText,
 		)
-		const result = await this.replaceAttachmentReference(file, sourcePath, originPath, cursor, generation, targetGroups, newLinkText)
+		const diskState = await this.nativeDiskReferenceState(sourcePath, cursor, targetGroups, isImageExtension(file.extension, this.attachmentTypes), generation)
+		if (!this.isCurrent(generation)) return null
+		const result = await this.replaceAttachmentReference(file, sourcePath, originPath, cursor, generation, targetGroups, newLinkText, diskState)
 		if (!this.isCurrent(generation)) return null
 
 		if (!this.settings.disableRenameNotice) {
 			new Notice(`Renamed ${originName} to ${newName}`)
 		}
 		return result.edit
+	}
+
+	referenceStateNearEditor(
+		cursor: EditorPosition,
+		lineCount: number,
+		getLine: (line: number) => string,
+		targetGroups: { old: readonly string[]; current: readonly string[] },
+		image: boolean,
+	): AttachmentReferenceState {
+		let state: AttachmentReferenceState = 'none'
+		replaceNearCursorInText(
+			cursor,
+			lineCount,
+			(content, contentCursor) => {
+				state = classifyAttachmentReference({
+					content,
+					cursor: contentCursor,
+					targetPaths: targetGroups.old,
+					currentTargetPaths: targetGroups.current,
+					image,
+				})
+				return null
+			},
+			getLine,
+		)
+		return state
+	}
+
+	async nativeDiskReferenceState(
+		sourcePath: string,
+		cursor: EditorPosition,
+		targetGroups: { old: readonly string[]; current: readonly string[] },
+		image: boolean,
+		generation: number,
+	): Promise<AttachmentReferenceState | null> {
+		const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath)
+		if (!(sourceFile instanceof TFile)) return null
+		let content: string
+		try {
+			content = await this.app.vault.read(sourceFile)
+		} catch {
+			return null
+		}
+		if (!this.isCurrent(generation)) return null
+		const lines = content.split(/\r?\n/)
+		return this.referenceStateNearEditor(cursor, lines.length, line => lines[line], targetGroups, image)
 	}
 
 	async replaceAttachmentReference(
@@ -376,6 +427,7 @@ export default class PasteRenamePlugin extends Plugin {
 			this.app.fileManager.generateMarkdownLink(file, sourcePath),
 		),
 		newLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath),
+		nativeLinkSyncState: AttachmentReferenceState | null = 'old',
 	): Promise<ReferenceReplacement> {
 		if (!this.isCurrent(generation)) return { matched: false, edit: null }
 		const currentPath = relativeAttachmentPath(sourcePath, file.path)
@@ -392,9 +444,29 @@ export default class PasteRenamePlugin extends Plugin {
 			if (!this.isCurrent(generation)) return null
 			const liveEditor = this.getActiveEditor()
 			if (!liveEditor || this.getActiveFile()?.path !== sourcePath) return null
+			const lineCount = liveEditor.lineCount()
+			if (nativeLinkSyncState !== 'old') {
+				const editorState = this.referenceStateNearEditor(
+					cursor,
+					lineCount,
+					line => liveEditor.getLine(line),
+					targetGroups,
+					image,
+				)
+				if (nativeLinkSyncDecision(nativeLinkSyncState, editorState) !== 'proceed') {
+					if (attempt + 1 < FIGURE_RETRY_COUNT) {
+						await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
+					}
+					return null
+				}
+			}
+			const anchorLine = Math.max(0, Math.min(cursor.line, lineCount - 1))
+			const firstLine = Math.max(0, anchorLine - BOUNDED_SEARCH_RADIUS)
+			const sliceStartLine = firstLine > 0 ? firstLine - 1 : 0
+			const initialContext = markdownDocumentContextBefore(Array.from({ length: sliceStartLine }, (_, line) => liveEditor.getLine(line)))
 			const edit = replaceNearCursorInText(
 				cursor,
-				liveEditor.lineCount(),
+				lineCount,
 				(content, contentCursor) => replaceAttachmentReference({
 					content,
 					cursor: contentCursor,
@@ -405,6 +477,7 @@ export default class PasteRenamePlugin extends Plugin {
 					image,
 					asFigure,
 					figureImageLine,
+					initialContext,
 				}),
 				line => liveEditor.getLine(line),
 			)
@@ -518,7 +591,7 @@ export default class PasteRenamePlugin extends Plugin {
 		if (file.path === oldPath) return
 		const oldRelativePath = relativeAttachmentPath(sourceFile.path, oldPath)
 		const newRelativePath = relativeAttachmentPath(sourceFile.path, file.path)
-		await this.app.vault.process(sourceFile, content => replaceGeneratedFigures(
+		await updateVaultText(this.app.vault, sourceFile, content => replaceGeneratedFigures(
 			content,
 			oldRelativePath,
 			newRelativePath,
@@ -652,25 +725,59 @@ export default class PasteRenamePlugin extends Plugin {
 		return `${this.manifest.dir}/attachment-types.json`
 	}
 
+	attachmentTypesDefaultPath(): string {
+		return `${this.manifest.dir}/attachment-types.default.json`
+	}
+
 	async loadAttachmentTypes(generation = this.cancellation.generation) {
+		let user: AttachmentTypeUserSource
 		try {
-			const raw = await this.app.vault.adapter.read(this.attachmentTypesPath())
+			const exists = await this.app.vault.adapter.exists(this.attachmentTypesPath())
 			if (!this.isCurrent(generation)) return
-			const result = parseAttachmentTypeConfig(raw)
-			if (result.ok === true) {
-				this.attachmentTypes = result.value
-				this.attachmentTypePersistence.current = cloneAttachmentTypeConfig(result.value)
-				commitAttachmentTypeSnapshot(this.attachmentTypePersistence, result.value)
-				return
+			if (!exists) {
+				user = { status: 'missing' }
+			} else {
+				try {
+					user = { status: 'read', text: await this.app.vault.adapter.read(this.attachmentTypesPath()) }
+					if (!this.isCurrent(generation)) return
+				} catch {
+					user = { status: 'unreadable' }
+				}
 			}
-			if (this.isCurrent(generation)) new Notice(`Invalid attachment types; using defaults (${result.error})`)
 		} catch {
-			if (this.isCurrent(generation)) new Notice('Attachment types file missing; using defaults')
+			user = { status: 'unreadable' }
 		}
-		if (this.isCurrent(generation)) {
-			this.attachmentTypes = cloneAttachmentTypeConfig(DEFAULT_ATTACHMENT_TYPE_CONFIG)
-			this.attachmentTypePersistence.current = cloneAttachmentTypeConfig(this.attachmentTypes)
-			commitAttachmentTypeSnapshot(this.attachmentTypePersistence, this.attachmentTypes)
+		if (!this.isCurrent(generation)) return
+
+		let shippedText: string | null = null
+		if (user.status === 'missing') {
+			try {
+				shippedText = await this.app.vault.adapter.read(this.attachmentTypesDefaultPath())
+			} catch {
+				shippedText = null
+			}
+			if (!this.isCurrent(generation)) return
+		}
+
+		const selection = chooseAttachmentTypeConfig(user, shippedText)
+		this.attachmentTypes = cloneAttachmentTypeConfig(selection.config)
+		this.attachmentTypePersistence.current = cloneAttachmentTypeConfig(this.attachmentTypes)
+		commitAttachmentTypeSnapshot(this.attachmentTypePersistence, this.attachmentTypes)
+		if (selection.invalidUserFile) {
+			new Notice('Invalid attachment types; using defaults without overwriting the file')
+			return
+		}
+		if (selection.unreadableUserFile) {
+			new Notice('Could not read attachment types; using defaults without overwriting the file')
+			return
+		}
+		if (selection.createUserFile) {
+			try {
+				await this.saveAttachmentTypes(this.attachmentTypes)
+				if (this.isCurrent(generation)) new Notice('Attachment types file missing; created defaults')
+			} catch (error) {
+				if (this.isCurrent(generation)) new Notice(`Could not create attachment types: ${error}`)
+			}
 		}
 	}
 

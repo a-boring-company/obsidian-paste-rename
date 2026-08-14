@@ -1,5 +1,6 @@
 import { pathsEqual } from './embeds'
 import { renderFigure } from './figure'
+import { advanceMarkdownDocumentContext, emptyMarkdownDocumentContext } from './markdown-context'
 
 function decodeHtmlAttribute(value: string): string {
 	const entities: Record<string, string> = {
@@ -45,16 +46,6 @@ function splitLines(value: string): LineRecord[] {
 		records.push({ text: match[1], start: match.index, end: match.index + match[1].length })
 	}
 	return records
-}
-
-function fenceStart(line: string): { marker: string; length: number } | null {
-	const match = /^ {0,3}(`{3,}|~{3,})/.exec(line)
-	return match ? { marker: match[1][0], length: match[1].length } : null
-}
-
-function isFenceEnd(line: string, fence: { marker: string; length: number }): boolean {
-	const match = new RegExp(`^ {0,3}${fence.marker}{${fence.length},}\\s*$`).test(line)
-	return match
 }
 
 function figureAt(lines: LineRecord[], index: number, value: string): GeneratedFigureBlock | null {
@@ -123,34 +114,23 @@ function isOwnedGeneratedFigure(block: GeneratedFigureBlock, expectedPath?: stri
 function generatedFigures(value: string): GeneratedFigureBlock[] {
 	const lines = splitLines(value)
 	const blocks: GeneratedFigureBlock[] = []
-	let frontmatter = lines[0]?.text.trim() === '---'
-	let fence: { marker: string; length: number } | null = null
-	let comment = false
+	let context = emptyMarkdownDocumentContext()
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index].text
-		if (frontmatter) {
-			if (index > 0 && (line.trim() === '---' || line.trim() === '...')) frontmatter = false
+		const nextContext = advanceMarkdownDocumentContext(context, line)
+		const contextStarted = !context.frontmatter && nextContext.frontmatter
+			|| context.fence === null && nextContext.fence !== null
+			|| !context.comment && nextContext.comment
+		if (context.frontmatter || context.fence !== null || context.comment || contextStarted) {
+			context = nextContext
 			continue
 		}
-		if (fence) {
-			if (isFenceEnd(line, fence)) fence = null
+		if (/^(?: {4}|\t)/.test(line)) {
+			context = nextContext
 			continue
 		}
-		if (comment) {
-			if (line.includes('-->')) comment = false
-			continue
-		}
-		if (line.includes('<!--')) {
-			if (!line.includes('-->')) comment = true
-			continue
-		}
-		const startedFence = fenceStart(line)
-		if (startedFence) {
-			fence = startedFence
-			continue
-		}
-		if (/^(?: {4}|\t)/.test(line)) continue
 		const block = figureAt(lines, index, value)
+		context = nextContext
 		if (block) {
 			blocks.push(block)
 			index += 3

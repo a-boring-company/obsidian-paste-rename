@@ -41,4 +41,5 @@ describe('generated figure batch references', () => {
 		expect(extractGeneratedFigurePaths(['```html', figure, '    ```', figure].join('\n'))).toEqual([])
 		expect(extractGeneratedFigurePaths(['    ```html', figure, '    ```'].join('\n'))).toEqual(['assets/exposed.png'])
 	})
+
 })
