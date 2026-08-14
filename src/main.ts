@@ -24,21 +24,24 @@ import {
 } from 'obsidian';
 
 import { ImageBatchRenameModal } from './batch';
+import { observeAsyncCommand } from './async-command';
 import { applyBatchChoice, createBatchChoiceState } from './batch-state';
 import { attachmentTargetPathGroups, extractGeneratedDestination, imageLinkText } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { replaceAttachmentReference } from './attachment-reference';
+import { collectBatchReferenceLinks } from './batch-references';
+import { replaceGeneratedFigures } from './figure-document';
 import { applyAttachmentTypeSnapshot, commitAttachmentTypeSnapshot, createAttachmentTypePersistence, reconcileAttachmentTypeFailure } from './attachment-type-state';
 import {
 	AttachmentTypeConfig,
 	cloneAttachmentTypeConfig,
 	DEFAULT_ATTACHMENT_TYPE_CONFIG,
-	isEligibleAttachmentExtension,
 	isImageExtension,
 	parseAttachmentTypeConfig,
 	parseAttachmentTypeTextarea,
 } from './attachment-types';
 import { cancelBurst, createBurstCancellation, isBurstCancelled } from './burst';
+import { isEligibleAttachmentCreate } from './create-eligibility';
 import { LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
 import { renderFigure } from './figure';
 import { normalizeFilenameStem } from './filename';
@@ -183,7 +186,13 @@ export default class PasteRenamePlugin extends Plugin {
 		}
 
 		const batchRenameAllImages = () => {
-			this.batchRenameAllImages()
+			void observeAsyncCommand(
+				() => this.batchRenameAllImages(),
+				error => {
+					console.error('Could not batch rename images', error)
+					new Notice('Could not batch rename images')
+				},
+			)
 		}
 		this.addCommand({
 			id: 'batch-rename-all-images',
@@ -200,9 +209,13 @@ export default class PasteRenamePlugin extends Plugin {
 	}
 
 	isEligibleCreate(file: TFile): boolean {
-		if (!isEligibleAttachmentExtension(file.extension, this.attachmentTypes)) return false
-		if (this.testExcludeExtension(file)) return false
-		return (isPastedImage(file) && isImageExtension(file.extension, this.attachmentTypes)) || this.settings.handleAllAttachments
+		return isEligibleAttachmentCreate(
+			file.extension,
+			isPastedImage(file),
+			this.settings.handleAllAttachments,
+			() => this.testExcludeExtension(file),
+			this.attachmentTypes,
+		)
 	}
 
 	enqueueRenameRequest(request: RenameRequest) {
@@ -451,7 +464,7 @@ export default class PasteRenamePlugin extends Plugin {
 			this.app,
 			activeFile,
 			async (file: TFile, name: string) => {
-				await this.renameFile(file, name, activeFile.path)
+				await this.renameBatchAttachment(file, name, activeFile)
 			},
 			() => {
 				const index = this.modals.indexOf(modal)
@@ -469,14 +482,21 @@ export default class PasteRenamePlugin extends Plugin {
 			return
 		}
 		const fileCache = this.app.metadataCache.getFileCache(activeFile)
-		if (!fileCache || !fileCache.embeds) return
+		const content = await this.app.vault.cachedRead(activeFile)
+		const links = collectBatchReferenceLinks(fileCache?.embeds?.map(embed => embed.link) ?? [], content)
+		if (!links.length) return
+		const files = new Map<string, TFile>()
 
-		for (const embed of fileCache.embeds) {
-			const file = this.app.metadataCache.getFirstLinkpathDest(embed.link, activeFile.path)
+		for (const link of links) {
+			const file = this.app.metadataCache.getFirstLinkpathDest(link, activeFile.path)
 			if (!file) {
-				console.warn('file not found', embed.link)
+				console.warn('file not found', link)
 				return
 			}
+			files.set(file.path, file)
+		}
+
+		for (const file of files.values()) {
 			if (!isImageExtension(file.extension, this.attachmentTypes)) return
 
 			// rename
@@ -487,8 +507,24 @@ export default class PasteRenamePlugin extends Plugin {
 				break;
 			}
 
-			await this.renameFile(file, newName, activeFile.path, false)
+			await this.renameBatchAttachment(file, newName, activeFile)
 		}
+	}
+
+	async renameBatchAttachment(file: TFile, newName: string, sourceFile: TFile): Promise<void> {
+		const oldPath = file.path
+		const oldStem = file.basename
+		await this.renameFile(file, newName, sourceFile.path, false)
+		if (file.path === oldPath) return
+		const oldRelativePath = relativeAttachmentPath(sourceFile.path, oldPath)
+		const newRelativePath = relativeAttachmentPath(sourceFile.path, file.path)
+		await this.app.vault.process(sourceFile, content => replaceGeneratedFigures(
+			content,
+			oldRelativePath,
+			newRelativePath,
+			oldStem,
+			file.basename,
+		))
 	}
 
 	// returns a new name for the input file, with extension

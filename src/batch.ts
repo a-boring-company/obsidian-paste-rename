@@ -1,9 +1,11 @@
-import { Modal, TFile, App, Setting } from 'obsidian';
+import { Modal, TFile, App, Notice, Setting } from 'obsidian';
 
 import {
 	path, createElementTree, debugLog, lockInputMethodComposition,
 } from './utils';
 import { normalizeFilenameStem } from './filename';
+import { collectBatchReferenceLinks } from './batch-references';
+import { beginBatchScan, canRenameBatch, createBatchScanState, invalidateBatchScan, isCurrentBatchScan, publishBatchScan, BatchScanState } from './batch-scan-state';
 
 interface State {
 	namePattern: string
@@ -24,6 +26,9 @@ export class ImageBatchRenameModal extends Modal {
 	renameFunc: renameFuncType
 	onCloseExtra: () => void
 	state: State
+	scanState: BatchScanState = createBatchScanState()
+	requestErrorEl: HTMLElement | null = null
+	renameAllButtonEl: HTMLButtonElement | null = null
 
 	constructor(app: App, activeFile: TFile, renameFunc: renameFuncType, onClose: () => void) {
 		super(app);
@@ -64,7 +69,7 @@ export class ImageBatchRenameModal extends Modal {
 					errorEl.style.display = 'block'
 					return
 				}
-				this.matchImageNames(tbodyEl)
+				void this.matchImageNames(tbodyEl)
 			}
 		})
 
@@ -81,7 +86,7 @@ export class ImageBatchRenameModal extends Modal {
 		extInputEl.addEventListener('keydown', async (e) => {
 			if (e.key === 'Enter') {
 				e.preventDefault()
-				this.matchImageNames(tbodyEl)
+				void this.matchImageNames(tbodyEl)
 			}
 		})
 
@@ -100,7 +105,7 @@ export class ImageBatchRenameModal extends Modal {
 		nrInputEl.addEventListener('keydown', async (e) => {
 			if (e.key === 'Enter' && !nrInputState.lock) {
 				e.preventDefault()
-				this.matchImageNames(tbodyEl)
+				void this.matchImageNames(tbodyEl)
 			}
 		})
 
@@ -142,19 +147,26 @@ export class ImageBatchRenameModal extends Modal {
 				style: 'display: none;',
 			}
 		})
+		this.requestErrorEl = errorEl
 
 		new Setting(contentEl)
 			.addButton(button => {
+				this.renameAllButtonEl = button.buttonEl
+				button.setDisabled(true)
 				button
 					.setButtonText('Rename all')
 					.setClass('mod-cta')
 					.onClick(() => {
+						if (!canRenameBatch(this.scanState)) return
 						new ConfirmModal(
 							this.app,
 							'Confirm rename all',
 							`Are you sure? This will rename all the ${this.state.renameTasks.length} attachments matched by the pattern.`,
 							() => {
-								this.renameAll()
+								void this.renameAll().catch(error => {
+									console.error('Could not rename attachments', error)
+									new Notice('Could not rename attachments')
+								})
 								this.close()
 							}
 						).open()
@@ -168,9 +180,21 @@ export class ImageBatchRenameModal extends Modal {
 	}
 
 	onClose() {
+		invalidateBatchScan(this.scanState)
+		this.requestErrorEl = null
+		this.renameAllButtonEl = null
 		const { contentEl } = this;
 		contentEl.empty();
 		this.onCloseExtra()
+	}
+
+	reportMatchError(message: string, error: unknown) {
+		console.error(message, error)
+		if (this.requestErrorEl) {
+			this.requestErrorEl.innerText = message
+			this.requestErrorEl.style.display = 'block'
+		}
+		new Notice(message)
 	}
 
 	async renameAll() {
@@ -180,21 +204,36 @@ export class ImageBatchRenameModal extends Modal {
 		}
 	}
 
-	matchImageNames(tbodyEl: HTMLElement) {
-		const { state } = this
-		const renameTasks: RenameTask[] = []
+	async matchImageNames(tbodyEl: HTMLElement) {
+		const token = beginBatchScan(this.scanState)
+		this.state.renameTasks = []
 		tbodyEl.empty()
-		const fileCache = this.app.metadataCache.getFileCache(this.activeFile)
-		if (!fileCache || !fileCache.embeds) return
-
-		const namePatternRegex = new RegExp(state.namePattern, 'g')
-		const extPatternRegex = new RegExp(state.extPattern)
-		fileCache.embeds.forEach(embed => {
-			const file = this.app.metadataCache.getFirstLinkpathDest(embed.link, this.activeFile.path)
-			if (!file) {
-				console.warn('file not found', embed.link)
-				return
+		if (this.renameAllButtonEl) this.renameAllButtonEl.disabled = true
+		if (this.requestErrorEl) {
+			this.requestErrorEl.innerText = ''
+			this.requestErrorEl.style.display = 'none'
+		}
+		const state = { ...this.state }
+		let content: string
+		try {
+			const fileCache = this.app.metadataCache.getFileCache(this.activeFile)
+			content = await this.app.vault.cachedRead(this.activeFile)
+			if (!isCurrentBatchScan(this.scanState, token)) return
+			const links = collectBatchReferenceLinks(fileCache?.embeds?.map(embed => embed.link) ?? [], content)
+			const files = new Map<string, TFile>()
+			for (const link of links) {
+				const file = this.app.metadataCache.getFirstLinkpathDest(link, this.activeFile.path)
+				if (!file) {
+					console.warn('file not found', link)
+					continue
+				}
+				files.set(file.path, file)
 			}
+
+			const namePatternRegex = new RegExp(state.namePattern, 'g')
+			const extPatternRegex = new RegExp(state.extPattern)
+			const renameTasks: RenameTask[] = []
+			files.forEach(file => {
 			// match ext (only if extPattern is not empty)
 			if (state.extPattern) {
 				const m0 = extPatternRegex.exec(file.extension)
@@ -256,10 +295,22 @@ export class ImageBatchRenameModal extends Modal {
 				]
 
 			})
-		})
+			})
 
-		debugLog('new renameTasks', renameTasks)
-		state.renameTasks = renameTasks
+			const published = publishBatchScan(this.scanState, renameTasks.length)
+			if (this.renameAllButtonEl) this.renameAllButtonEl.disabled = !published
+			if (published) {
+				debugLog('new renameTasks', renameTasks)
+				this.state.renameTasks = renameTasks
+			}
+		} catch (error) {
+			if (!isCurrentBatchScan(this.scanState, token)) return
+			this.state.renameTasks = []
+			if (this.renameAllButtonEl) this.renameAllButtonEl.disabled = true
+			tbodyEl.empty()
+			const message = error instanceof SyntaxError ? 'Invalid rename pattern' : 'Could not read attachments'
+			this.reportMatchError(message, error)
+		}
 	}
 }
 

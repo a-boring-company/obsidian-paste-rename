@@ -20,6 +20,36 @@ describe('attachment reference replacement', () => {
 		expect(result?.text).toBe('![old.png](new.png)')
 	})
 
+	it('updates embedded and non-embedded non-image wiki and Markdown references', () => {
+		expect(replaceAttachmentReference({
+			content: '![[old.pdf|Report]]', cursor: 5, targetPaths: ['old.pdf'],
+			replacement: '[[new.pdf|Report]]', replacementPath: 'new.pdf', image: false, asFigure: false,
+		})?.text).toBe('![[new.pdf|Report]]')
+		expect(replaceAttachmentReference({
+			content: '[[old.pdf|Report]]', cursor: 5, targetPaths: ['old.pdf'],
+			replacement: '[[new.pdf|Report]]', replacementPath: 'new.pdf', image: false, asFigure: false,
+		})?.text).toBe('[[new.pdf|Report]]')
+		expect(replaceAttachmentReference({
+			content: '![Report](old.pdf "Title")', cursor: 5, targetPaths: ['old.pdf'],
+			replacement: '[Report](new.pdf "Title")', replacementPath: 'new.pdf', image: false, asFigure: false,
+		})?.text).toBe('![Report](new.pdf "Title")')
+		expect(replaceAttachmentReference({
+			content: '[Report](old.pdf "Title")', cursor: 5, targetPaths: ['old.pdf'],
+			replacement: '[Report](new.pdf "Title")', replacementPath: 'new.pdf', image: false, asFigure: false,
+		})?.text).toBe('[Report](new.pdf "Title")')
+	})
+
+	it('recognizes current embedded non-image references after rename', () => {
+		expect(replaceAttachmentReference({
+			content: '![[new.pdf|Report]]', cursor: 5, targetPaths: ['old.pdf'], currentTargetPaths: ['new.pdf'],
+			replacement: '[[new.pdf|Report]]', replacementPath: 'new.pdf', image: false, asFigure: false,
+		})?.matched).toBe(true)
+		expect(replaceAttachmentReference({
+			content: '![Report](new.pdf "Title")', cursor: 5, targetPaths: ['old.pdf'], currentTargetPaths: ['new.pdf'],
+			replacement: '[Report](new.pdf "Title")', replacementPath: 'new.pdf', image: false, asFigure: false,
+		})?.matched).toBe(true)
+	})
+
 	it('recognizes an already-updated image reference without changing it', () => {
 		const result = replaceAttachmentReference({
 			content: '![new.png](new.png)', cursor: 0, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],

@@ -30,7 +30,7 @@ function distanceFromCandidate(position: number, candidate: ReferenceCandidate):
 
 function nearestCandidate(content: string, cursor: number, input: AttachmentReferenceInput): ReferenceCandidate | null {
 	const candidates: ReferenceCandidate[] = findReferenceOccurrences(content)
-		.filter(reference => reference.image === input.image)
+		.filter(reference => input.image ? reference.image : true)
 		.map(reference => ({
 			start: reference.start,
 			end: reference.end,
