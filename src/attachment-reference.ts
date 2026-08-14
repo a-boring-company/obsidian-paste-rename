@@ -126,10 +126,25 @@ function canRenderTopLevelFigure(content: string, candidate: ReferenceCandidate,
 	return candidate.start === lineStart && !isInsideExcludedContext(content, candidate.start, initialContext)
 }
 
+function figureBoundarySuffix(after: string): string {
+	if (!after) return ''
+	const firstLineEnding = after.match(/\r\n|\n|\r/)
+	if (!firstLineEnding || firstLineEnding.index === undefined) return after.trim() ? '\n\n' : ''
+	const lineEnding = firstLineEnding[0]
+	const firstLineEnd = firstLineEnding.index + lineEnding.length
+	const firstLine = after.slice(0, firstLineEnding.index)
+	if (firstLine.trim()) return `${lineEnding}${lineEnding}`
+	const rest = after.slice(firstLineEnd)
+	if (!rest.trim()) return ''
+	const secondLineEnding = rest.match(/\r\n|\n|\r/)
+	if (secondLineEnding && secondLineEnding.index !== undefined && !rest.slice(0, secondLineEnding.index).trim()) return ''
+	return lineEnding
+}
+
 function replaceCandidate(content: string, candidate: ReferenceCandidate, replacement: string): LineReplacement {
 	const before = content.slice(0, candidate.start)
 	const after = content.slice(candidate.end)
-	const suffix = after ? '\n' : ''
+	const suffix = figureBoundarySuffix(after)
 	const replacementText = `${replacement}${suffix}`
 	return {
 		text: `${before}${replacementText}${after}`,

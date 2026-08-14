@@ -118,6 +118,34 @@ describe('attachment reference replacement', () => {
 		expect(result?.text).toBe('<figure>new</figure>\n\n![[doc.pdf]]')
 	})
 
+	it.each([
+		['LF before following embed', '![[old.png]]\n![[doc.pdf]]', '<figure>new</figure>\n\n![[doc.pdf]]'],
+		['CRLF before following embed', '![[old.png]]\r\n![[doc.pdf]]', '<figure>new</figure>\r\n\r\n![[doc.pdf]]'],
+		['inline embed', '![[old.png]] ![[doc.pdf]]', '<figure>new</figure>\n\n ![[doc.pdf]]'],
+		['inline text', '![[old.png]] after', '<figure>new</figure>\n\n after'],
+		['inline text before a line ending', '![[old.png]] after\n![[doc.pdf]]', '<figure>new</figure>\n\n after\n![[doc.pdf]]'],
+		['existing blank separator', '![[old.png]]\n\n![[doc.pdf]]', '<figure>new</figure>\n\n![[doc.pdf]]'],
+		['whitespace-only blank separator', '![[old.png]]\n  \n![[doc.pdf]]', '<figure>new</figure>\n  \n![[doc.pdf]]'],
+		['bare EOF', '![[old.png]]', '<figure>new</figure>'],
+		['terminal LF EOF', '![[old.png]]\n', '<figure>new</figure>\n'],
+		['terminal CRLF EOF', '![[old.png]]\r\n', '<figure>new</figure>\r\n'],
+		['trailing whitespace', '![[old.png]]   ', '<figure>new</figure>   '],
+	] as const)('preserves the figure boundary for %s', (_label, content, expected) => {
+		const result = replaceAttachmentReference({
+			content, cursor: 5, targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})
+		expect(result?.text).toBe(expected)
+	})
+
+	it('keeps replacement offsets stable beside the following burst item', () => {
+		const result = replaceAttachmentReference({
+			content: '![[old.png]]\n![[doc.pdf]]', cursor: 5, targetPaths: ['old.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})
+		expect(result).toMatchObject({ start: 0, end: 12, replacementText: '<figure>new</figure>\n' })
+	})
+
 	it('preserves the image marker in Markdown mode when alwaysUpdateLinks is false', () => {
 		const result = replaceAttachmentReference({
 			content: '![old.png](old.png)', cursor: 10, targetPaths: ['old.png', '../old.png', '/old.png'],
@@ -274,7 +302,7 @@ describe('attachment reference replacement', () => {
 			content: '![[old.png]] after', cursor: 5, targetPaths: ['old.png'],
 			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
 		})
-		expect(result?.text).toBe('<figure>new</figure>\n after')
+		expect(result?.text).toBe('<figure>new</figure>\n\n after')
 	})
 
 	it('uses the preceding fence state for bounded old and current references', () => {
