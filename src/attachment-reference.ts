@@ -90,8 +90,9 @@ export function nativeLinkSyncDecision(
 	diskState: AttachmentReferenceState | null,
 	editorState: AttachmentReferenceState,
 ): NativeLinkSyncDecision {
-	if (diskState === 'old') return 'proceed'
+	if (editorState === 'none') return 'abort'
 	if (diskState === 'current') return editorState === 'current' ? 'proceed' : 'wait'
+	if (diskState === 'old' || diskState === 'none') return 'proceed'
 	return 'abort'
 }
 

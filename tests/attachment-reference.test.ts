@@ -21,11 +21,30 @@ describe('attachment reference replacement', () => {
 
 	it('allows only proven disk states to proceed after native rename', () => {
 		expect(nativeLinkSyncDecision('current', 'old')).toBe('wait')
-		expect(nativeLinkSyncDecision('current', 'none')).toBe('wait')
+		expect(nativeLinkSyncDecision('current', 'none')).toBe('abort')
 		expect(nativeLinkSyncDecision('current', 'current')).toBe('proceed')
 		expect(nativeLinkSyncDecision('old', 'old')).toBe('proceed')
-		expect(nativeLinkSyncDecision('none', 'current')).toBe('abort')
+		expect(nativeLinkSyncDecision('none', 'old')).toBe('proceed')
+		expect(nativeLinkSyncDecision('none', 'current')).toBe('proceed')
+		expect(nativeLinkSyncDecision('none', 'none')).toBe('abort')
 		expect(nativeLinkSyncDecision(null, 'old')).toBe('abort')
+		expect(nativeLinkSyncDecision(null, 'current')).toBe('abort')
+	})
+
+	it('allows an unsaved editor old reference when disk has not flushed it', () => {
+		const diskState = classifyAttachmentReference({
+			content: 'note text without the new embed', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], image: true,
+		})
+		const editorState = classifyAttachmentReference({
+			content: '![[old.png]]', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], image: true,
+		})
+		expect(diskState).toBe('none')
+		expect(editorState).toBe('old')
+		expect(nativeLinkSyncDecision(diskState, editorState)).toBe('proceed')
+		expect(replaceAttachmentReference({
+			content: '![[old.png]]', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'],
+			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
+		})?.text).toBe('<figure>new</figure>')
 	})
 
 	it('manually converts an old wikilink to HTML when alwaysUpdateLinks is false', () => {
