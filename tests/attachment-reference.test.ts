@@ -124,6 +124,7 @@ describe('attachment reference replacement', () => {
 		['inline embed', '![[old.png]] ![[doc.pdf]]', '<figure>new</figure>\n\n ![[doc.pdf]]'],
 		['inline text', '![[old.png]] after', '<figure>new</figure>\n\n after'],
 		['inline text after a preceding CRLF', 'before\r\n![[old.png]] after', 'before\r\n<figure>new</figure>\r\n\r\n after'],
+		['inline text after the latest mixed-ending line', 'first\nbefore\r\n![[old.png]] after', 'first\nbefore\r\n<figure>new</figure>\r\n\r\n after'],
 		['inline text before a line ending', '![[old.png]] after\n![[doc.pdf]]', '<figure>new</figure>\n\n after\n![[doc.pdf]]'],
 		['existing blank separator', '![[old.png]]\n\n![[doc.pdf]]', '<figure>new</figure>\n\n![[doc.pdf]]'],
 		['whitespace-only blank separator', '![[old.png]]\n  \n![[doc.pdf]]', '<figure>new</figure>\n  \n![[doc.pdf]]'],

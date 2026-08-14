@@ -144,7 +144,7 @@ function figureBoundarySuffix(after: string, fallbackLineEnding: string): string
 function replaceCandidate(content: string, candidate: ReferenceCandidate, replacement: string): LineReplacement {
 	const before = content.slice(0, candidate.start)
 	const after = content.slice(candidate.end)
-	const lineEndings = content.match(/\r\n|\n|\r/)
+	const lineEndings = before.match(/\r\n|\n|\r/g)
 	const fallbackLineEnding = lineEndings ? lineEndings[lineEndings.length - 1] : '\n'
 	const suffix = figureBoundarySuffix(after, fallbackLineEnding)
 	const replacementText = `${replacement}${suffix}`
