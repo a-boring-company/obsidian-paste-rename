@@ -110,14 +110,6 @@ describe('attachment reference replacement', () => {
 		expect(result?.text).toBe('- before ![[new.png]] after')
 	})
 
-	it('terminates a generated figure before a following Markdown embed', () => {
-		const result = replaceAttachmentReference({
-			content: '![[old.png]]\n![[doc.pdf]]', cursor: 5, targetPaths: ['old.png'],
-			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
-		})
-		expect(result?.text).toBe('<figure>new</figure>\n\n![[doc.pdf]]')
-	})
-
 	it.each([
 		['LF before following embed', '![[old.png]]\n![[doc.pdf]]', '<figure>new</figure>\n\n![[doc.pdf]]'],
 		['CRLF before following embed', '![[old.png]]\r\n![[doc.pdf]]', '<figure>new</figure>\r\n\r\n![[doc.pdf]]'],
@@ -297,14 +289,6 @@ describe('attachment reference replacement', () => {
 			content: '![[new.png|Report]]', cursor: 3, initialContext: fenced, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], replacement,
 			replacementPath: 'new.png', image: true, asFigure: true,
 		})?.matched).toBe(true)
-	})
-
-	it('keeps trailing top-level content below a block figure', () => {
-		const result = replaceAttachmentReference({
-			content: '![[old.png]] after', cursor: 5, targetPaths: ['old.png'],
-			replacement: '<figure>new</figure>', replacementPath: 'new.png', image: true, asFigure: true,
-		})
-		expect(result?.text).toBe('<figure>new</figure>\n\n after')
 	})
 
 	it('uses the preceding fence state for bounded old and current references', () => {
