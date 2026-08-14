@@ -126,10 +126,10 @@ function canRenderTopLevelFigure(content: string, candidate: ReferenceCandidate,
 	return candidate.start === lineStart && !isInsideExcludedContext(content, candidate.start, initialContext)
 }
 
-function figureBoundarySuffix(after: string): string {
+function figureBoundarySuffix(after: string, fallbackLineEnding: string): string {
 	if (!after) return ''
 	const firstLineEnding = after.match(/\r\n|\n|\r/)
-	if (!firstLineEnding || firstLineEnding.index === undefined) return after.trim() ? '\n\n' : ''
+	if (!firstLineEnding || firstLineEnding.index === undefined) return after.trim() ? `${fallbackLineEnding}${fallbackLineEnding}` : ''
 	const lineEnding = firstLineEnding[0]
 	const firstLineEnd = firstLineEnding.index + lineEnding.length
 	const firstLine = after.slice(0, firstLineEnding.index)
@@ -144,7 +144,9 @@ function figureBoundarySuffix(after: string): string {
 function replaceCandidate(content: string, candidate: ReferenceCandidate, replacement: string): LineReplacement {
 	const before = content.slice(0, candidate.start)
 	const after = content.slice(candidate.end)
-	const suffix = figureBoundarySuffix(after)
+	const lineEndings = content.match(/\r\n|\n|\r/)
+	const fallbackLineEnding = lineEndings ? lineEndings[lineEndings.length - 1] : '\n'
+	const suffix = figureBoundarySuffix(after, fallbackLineEnding)
 	const replacementText = `${replacement}${suffix}`
 	return {
 		text: `${before}${replacementText}${after}`,
