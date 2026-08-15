@@ -1,18 +1,9 @@
-/* TODOs:
- * - [x] check name existence when saving
- * - [x] imageNameKey in frontmatter
- * - [x] after renaming, cursor should be placed after the image file link
- * - [x] handle image insert from drag'n drop
- * - [ ] select text when opening the renaming modal, make this an option
- * - [ ] add button for use the current file name, imageNameKey, last input name,
- *       segments of last input name
- * - [x] batch rename all pasted images in a file
- * - [ ] add rules for moving matched images to destination folder
- */
 import {
-  App,
+	App,
+	Editor,
+  EditorPosition,
   HeadingCache,
-  MarkdownView,
+	MarkdownView,
   Modal,
   Notice,
   Plugin,
@@ -21,9 +12,38 @@ import {
   TAbstractFile,
   TFile,
 } from 'obsidian';
+import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
+import { applyBatchChoice, createBatchChoiceState } from './batch-state';
+import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent } from './batch-content';
+import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
+import { relativeAttachmentPath, renameInPlace } from './attachment-path';
+import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
+import { CachedAttachmentGroup, CachedEmbedOccurrence, attachmentTargetDiscovered, cacheEmbedOccurrences, cacheReferenceOccurrences, deriveRetargetDestinations, groupCachedAttachments, retargetCachedOccurrences } from './batch-occurrences';
+import { AttachmentTypeUserSource, chooseAttachmentTypeConfig } from './attachment-type-files';
+import { applyAttachmentTypeSnapshot, commitAttachmentTypeSnapshot, createAttachmentTypePersistence, reconcileAttachmentTypeFailure } from './attachment-type-state';
+import {
+	AttachmentTypeConfig,
+	cloneAttachmentTypeConfig,
+	DEFAULT_ATTACHMENT_TYPE_CONFIG,
+	isEligibleAttachmentExtension,
+	isImageExtension,
+	parseAttachmentTypeConfig,
+	parseAttachmentTypeTextarea,
+} from './attachment-types';
+import { cancelBurst, createBurstCancellation, isBurstCancelled } from './burst';
+import { isEligibleAttachmentCreate } from './create-eligibility';
+import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
+import { renderFigure } from './figure';
+import { normalizeFilenameStem } from './filename';
+import { markdownDocumentContextBefore } from './markdown-context';
+import { extractGeneratedFigurePaths } from './figure-document';
+import { retryBounded } from './retry';
+import { resolveImageOutput } from './settings-compat';
 import { renderTemplate } from './template';
+import { compareAndWriteVaultText, processVaultText } from './vault-text';
+import { createSerializedWriteQueue } from './write-queue';
 import {
   createElementTree,
   DEBUG,
@@ -43,34 +63,97 @@ interface PluginSettings {
 	dupNumberAlways: boolean
 	autoRename: boolean
 	handleAllAttachments: boolean
+	imageOutput: 'html' | 'markdown'
+	imageWidth: number
 	excludeExtensionPattern: string
 	disableRenameNotice: boolean
 }
 
-const DEFAULT_SETTINGS: PluginSettings = {
+export const DEFAULT_SETTINGS: PluginSettings = {
 	imageNamePattern: '{{fileName}}',
 	dupNumberAtStart: false,
 	dupNumberDelimiter: '-',
 	dupNumberAlways: false,
 	autoRename: false,
-	handleAllAttachments: false,
+	handleAllAttachments: true,
+	imageOutput: 'html',
+	imageWidth: 80,
 	excludeExtensionPattern: '',
 	disableRenameNotice: false,
 }
 
 const PASTED_IMAGE_PREFIX = 'Pasted image '
+const CREATE_BURST_DELAY_MS = 100
+const FIGURE_RETRY_COUNT = 5
+const FIGURE_RETRY_DELAY_MS = 50
+
+interface RenameRequest {
+	file: TFile
+	sourceFile: TFile
+	sourcePath: string
+	cursor: EditorPosition
+	autoRename: boolean
+	generation: number
+}
+
+interface RenameTask extends RenameRequest {
+	id: string
+	proposedName: string
+	stem: string
+	isMeaningful: boolean
+}
+
+interface ModalChoice {
+	action: 'rename' | 'cancel'
+	name?: string
+	applyToRemaining: boolean
+}
+
+interface ReferenceReplacement {
+	matched: boolean
+	edit: LineEdit | null
+}
+
+interface RenameFileResult {
+	success: boolean
+	edit: LineEdit | null
+}
+
+type BatchEditorReadiness = { ready: true } | { detached: true }
+
+interface BatchSourceSnapshot {
+	content: string
+	embeds: CachedEmbedOccurrence[]
+	references: CachedEmbedOccurrence[]
+}
 
 
 export default class PasteRenamePlugin extends Plugin {
 	settings: PluginSettings
+	attachmentTypes: AttachmentTypeConfig = DEFAULT_ATTACHMENT_TYPE_CONFIG
 	modals: Modal[] = []
 	excludeExtensionRegex: RegExp
+	pendingRenameRequests: RenameRequest[] = []
+	burstTimer: number | null = null
+	processingBurst = false
+	cancellation = createBurstCancellation()
+	attachmentTypeWrites = createSerializedWriteQueue(cloneAttachmentTypeConfig)
+	attachmentTypePersistence = createAttachmentTypePersistence(DEFAULT_ATTACHMENT_TYPE_CONFIG)
+	metadataLedger = new BatchMetadataLedger()
 
 	async onload() {
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const pkg = require('../package.json')
-		console.log(`Plugin loading: ${pkg.name} ${pkg.version} BUILD_ENV=${process.env.BUILD_ENV}`)
+		const generation = this.cancellation.generation
+		this.registerEvent(this.app.metadataCache.on('changed', (file, data, cache) => {
+			this.metadataLedger.record(file.path, data, cache)
+		}))
+		this.registerEvent(this.app.vault.on('modify', file => this.metadataLedger.invalidate(file.path)))
+		this.registerEvent(this.app.vault.on('delete', file => this.metadataLedger.invalidate(file.path)))
+		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => this.metadataLedger.invalidateRename(oldPath, file.path)))
+		console.log(`Plugin loading: ${this.manifest.name} ${this.manifest.version} BUILD_ENV=${process.env.BUILD_ENV}`)
 		await this.loadSettings();
+		if (!this.isCurrent(generation)) return
+		await this.loadAttachmentTypes(generation);
+		if (!this.isCurrent(generation)) return
 
 		this.registerEvent(
 			this.app.vault.on('create', (file) => {
@@ -84,19 +167,23 @@ export default class PasteRenamePlugin extends Plugin {
 				// always ignore markdown file creation
 				if (isMarkdownFile(file))
 					return
-				if (isPastedImage(file)) {
-					debugLog('pasted image created', file)
-					this.startRenameProcess(file, this.settings.autoRename)
-				} else {
-					if (this.settings.handleAllAttachments) {
-						debugLog('handleAllAttachments for file', file)
-						if (this.testExcludeExtension(file)) {
-							debugLog('excluded file by ext', file)
-							return
-						}
-						this.startRenameProcess(file, this.settings.autoRename)
-					}
+				if (!this.isEligibleCreate(file)) return
+				const sourceFile = this.getActiveFile()
+				if (!sourceFile) {
+					new Notice('Error: No active file found.')
+					return
 				}
+				const editor = this.getActiveEditor()
+				const cursor = editor?.getCursor() || { line: 0, ch: 0 }
+				debugLog('attachment created', file)
+				this.enqueueRenameRequest({
+					file,
+					sourceFile,
+					sourcePath: sourceFile.path,
+					cursor,
+					autoRename: this.settings.autoRename,
+					generation: this.cancellation.generation,
+				})
 			})
 		)
 
@@ -113,7 +200,10 @@ export default class PasteRenamePlugin extends Plugin {
 		}
 
 		const batchRenameAllImages = () => {
-			this.batchRenameAllImages()
+			void this.batchRenameAllImages().catch(error => {
+				console.error('Could not batch rename images', error)
+				new Notice('Could not batch rename images')
+			})
 		}
 		this.addCommand({
 			id: 'batch-rename-all-images',
@@ -129,104 +219,341 @@ export default class PasteRenamePlugin extends Plugin {
 
 	}
 
-	async startRenameProcess(file: TFile, autoRename = false) {
-		// get active file first
-		const activeFile = this.getActiveFile()
-		if (!activeFile) {
-			new Notice('Error: No active file found.')
-			return
-		}
-
-		const { stem, newName, isMeaningful }= this.generateNewName(file, activeFile)
-		debugLog('generated newName:', newName, isMeaningful)
-
-		if (!isMeaningful || !autoRename) {
-			this.openRenameModal(file, isMeaningful ? stem : '', activeFile.path)
-			return
-		}
-		this.renameFile(file, newName, activeFile.path, true)
+	isEligibleCreate(file: TFile): boolean {
+		return isEligibleAttachmentCreate(
+			file.extension,
+			isPastedImage(file),
+			this.settings.handleAllAttachments,
+			() => this.testExcludeExtension(file),
+			this.attachmentTypes,
+		)
 	}
 
-	async renameFile(file: TFile, inputNewName: string, sourcePath: string, replaceCurrentLine?: boolean) {
-		// deduplicate name
-		const { name:newName } = await this.deduplicateNewName(inputNewName, file)
-		debugLog('deduplicated newName:', newName)
-		const originName = file.name
+	enqueueRenameRequest(request: RenameRequest) {
+		this.pendingRenameRequests.push(request)
+		if (this.burstTimer !== null) window.clearTimeout(this.burstTimer)
+		this.burstTimer = window.setTimeout(() => {
+			this.burstTimer = null
+			void this.processPendingBurst()
+		}, CREATE_BURST_DELAY_MS)
+	}
 
-		// generate linkText using Obsidian API, linkText is either  ![](filename.png) or ![[filename.png]] according to the "Use [[Wikilinks]]" setting.
-		const linkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
-
-		// file system operation: rename the file
-		const newPath = path.join(file.parent.path, newName)
+	async processPendingBurst() {
+		if (this.processingBurst || !this.pendingRenameRequests.length || this.cancellation.cancelled) return
+		this.processingBurst = true
+		const requests = this.pendingRenameRequests.splice(0)
+		const generation = requests[0]?.generation ?? this.cancellation.generation
 		try {
-			await this.app.fileManager.renameFile(file, newPath)
-		} catch (err) {
-			new Notice(`Failed to rename ${newName}: ${err}`)
-			throw err
+			await this.processRenameBurst(requests, generation)
+		} finally {
+			this.processingBurst = false
+			if (this.pendingRenameRequests.length && this.isCurrent(generation)) {
+				this.burstTimer = window.setTimeout(() => {
+					this.burstTimer = null
+					void this.processPendingBurst()
+				}, CREATE_BURST_DELAY_MS)
+			}
 		}
+	}
+
+	async processRenameBurst(requests: RenameRequest[], generation = this.cancellation.generation) {
+		if (!this.isCurrent(generation)) return
+		const tasks: RenameTask[] = requests.map((request, index) => {
+			const generated = this.generateNewName(request.file, request.sourceFile)
+			return { ...request, id: `${index}`, proposedName: generated.newName, stem: generated.stem, isMeaningful: generated.isMeaningful }
+		})
+		let state = createBatchChoiceState(tasks.map(task => ({ id: task.id, proposedName: task.proposedName })))
+		const taskById = new Map(tasks.map(task => [task.id, task]))
+		while (state.remaining.length) {
+			if (!this.isCurrent(generation)) return
+			const current = taskById.get(state.remaining[0].id)
+			if (!current) break
+			if (current.autoRename && current.isMeaningful) {
+				const result = applyBatchChoice(state, 'rename', { name: current.proposedName })
+				await this.applyRenameDecisions(result.decisions, taskById, generation)
+				state = result.state
+				continue
+			}
+			const choice = await this.openRenameModal(current, state.remaining.length > 1, generation)
+			if (!this.isCurrent(generation)) return
+			const result = applyBatchChoice(state, choice.action, {
+				name: choice.name,
+				applyToRemaining: choice.applyToRemaining,
+			})
+			await this.applyRenameDecisions(result.decisions, taskById, generation)
+			state = result.state
+		}
+	}
+
+	async applyRenameDecisions(
+		decisions: Array<{ id: string; action: 'rename' | 'cancel'; name: string }>,
+		taskById: Map<string, RenameTask>,
+		generation = this.cancellation.generation,
+	) {
+		for (const decision of decisions) {
+			if (!this.isCurrent(generation)) return
+			const task = taskById.get(decision.id)
+			if (!task) continue
+			if (decision.action === 'rename') {
+				const result = await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation)
+				if (result.success && result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
+			} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
+				const result = await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
+				if (result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
+			}
+		}
+	}
+
+	updateTaskCursors(taskById: Map<string, RenameTask>, edit: LineEdit) {
+		for (const task of taskById.values()) task.cursor = mapCursorAfterLineEdit(task.cursor, edit)
+	}
+
+	async renameFile(
+		file: TFile,
+		inputNewName: string,
+		sourcePath: string,
+		replaceCurrentLine = false,
+		capturedCursor?: EditorPosition,
+		generation = this.cancellation.generation,
+	): Promise<RenameFileResult> {
+		const originPath = file.path
+		const suffix = file.extension ? `.${file.extension}` : ''
+		const rawStem = suffix && inputNewName.endsWith(suffix) ? inputNewName.slice(0, -suffix.length) : inputNewName
+		const normalizedStem = normalizeFilenameStem(rawStem)
+		if (!normalizedStem) {
+			if (this.isCurrent(generation)) new Notice('Failed to rename attachment: new name is empty')
+			return { success: false, edit: null }
+		}
+		const normalizedName = suffix ? `${normalizedStem}${suffix}` : normalizedStem
+		const originName = file.name
+		const noOp = originName === normalizedName
+		// deduplicate name
+		const { name: newName } = noOp ? { name: normalizedName } : await this.deduplicateNewName(normalizedName, file)
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
+		debugLog('deduplicated newName:', newName)
+		const oldLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
+		// File system operation: rename the file in its current parent directory.
+		const newPath = renameInPlace(originPath, newName)
+		if (!noOp) {
+			try {
+				if (!this.isCurrent(generation)) return { success: false, edit: null }
+				await this.app.fileManager.renameFile(file, newPath)
+			} catch (err) {
+				if (this.isCurrent(generation)) new Notice(`Failed to rename ${newName}: ${err}`)
+				return { success: false, edit: null }
+			}
+		}
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
 
 		if (!replaceCurrentLine) {
-			return
+			return { success: true, edit: null }
 		}
 
 		// in case fileManager.renameFile may not update the internal link in the active file,
 		// we manually replace the current line by manipulating the editor
 
 		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
-		debugLog('replace text', linkText, newLinkText)
-
-		const editor = this.getActiveEditor()
-		if (!editor) {
-			new Notice(`Failed to rename ${newName}: no active editor`)
-			return
-		}
-
-		const cursor = editor.getCursor()
-		const line = editor.getLine(cursor.line)
-		const replacedLine = line.replace(linkText, newLinkText)
-		debugLog('current line -> replaced line', line, replacedLine)
-		// console.log('editor context', cursor, )
-		editor.transaction({
-			changes: [
-				{
-					from: {...cursor, ch: 0},
-					to: {...cursor, ch: line.length},
-					text: replacedLine,
-				}
-			]
-		})
+		debugLog('replace text', newLinkText)
+		const cursor = capturedCursor || this.getActiveEditor()?.getCursor() || { line: 0, ch: 0 }
+		const targetGroups = attachmentTargetPathGroups(
+			sourcePath,
+			originPath,
+			file.path,
+			oldLinkText,
+			newLinkText,
+		)
+		const diskState = await this.nativeDiskReferenceState(sourcePath, cursor, targetGroups, isImageExtension(file.extension, this.attachmentTypes), generation)
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
+		const result = await this.replaceAttachmentReference(file, sourcePath, originPath, cursor, generation, targetGroups, newLinkText, diskState)
+		if (!this.isCurrent(generation)) return { success: false, edit: null }
 
 		if (!this.settings.disableRenameNotice) {
 			new Notice(`Renamed ${originName} to ${newName}`)
 		}
+		return { success: true, edit: result.edit }
 	}
 
-	openRenameModal(file: TFile, newName: string, sourcePath: string) {
-		const modal = new ImageRenameModal(
-			this.app, file as TFile, newName,
-			(confirmedName: string) => {
-				debugLog('confirmedName:', confirmedName)
-				this.renameFile(file, confirmedName, sourcePath, true)
+	referenceStateNearEditor(
+		cursor: EditorPosition,
+		lineCount: number,
+		getLine: (line: number) => string,
+		targetGroups: { old: readonly string[]; current: readonly string[] },
+		image: boolean,
+	): AttachmentReferenceState {
+		let state: AttachmentReferenceState = 'none'
+		replaceNearCursorInText(
+			cursor,
+			lineCount,
+			(content, contentCursor) => {
+				state = classifyAttachmentReference({
+					content,
+					cursor: contentCursor,
+					targetPaths: targetGroups.old,
+					currentTargetPaths: targetGroups.current,
+					image,
+				})
+				return null
 			},
-			() => {
-				this.modals.splice(this.modals.indexOf(modal), 1)
-			}
+			getLine,
 		)
-		this.modals.push(modal)
-		modal.open()
-		debugLog('modals count', this.modals.length)
+		return state
+	}
+
+	async nativeDiskReferenceState(
+		sourcePath: string,
+		cursor: EditorPosition,
+		targetGroups: { old: readonly string[]; current: readonly string[] },
+		image: boolean,
+		generation: number,
+	): Promise<AttachmentReferenceState | null> {
+		const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath)
+		if (!(sourceFile instanceof TFile)) return null
+		let content: string
+		try {
+			content = await this.app.vault.read(sourceFile)
+		} catch {
+			return null
+		}
+		if (!this.isCurrent(generation)) return null
+		const lines = content.split(/\r?\n/)
+		return this.referenceStateNearEditor(cursor, lines.length, line => lines[line], targetGroups, image)
+	}
+
+	async replaceAttachmentReference(
+		file: TFile,
+		sourcePath: string,
+		previousPath: string,
+		cursor: EditorPosition,
+		generation = this.cancellation.generation,
+		targetGroups = attachmentTargetPathGroups(
+			sourcePath,
+			previousPath,
+			file.path,
+			this.app.fileManager.generateMarkdownLink(file, sourcePath),
+			this.app.fileManager.generateMarkdownLink(file, sourcePath),
+		),
+		newLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath),
+		nativeLinkSyncState: AttachmentReferenceState | null = 'old',
+	): Promise<ReferenceReplacement> {
+		if (!this.isCurrent(generation)) return { matched: false, edit: null }
+		const currentPath = relativeAttachmentPath(sourcePath, file.path)
+		const targetPaths = targetGroups.old
+		const image = isImageExtension(file.extension, this.attachmentTypes)
+		const asFigure = image && this.settings.imageOutput === 'html'
+		const desiredLinkText = image && !newLinkText.startsWith('!') ? `!${newLinkText}` : newLinkText
+		const replacementPath = extractGeneratedDestination(newLinkText) ?? currentPath
+		const replacement = asFigure
+			? renderFigure({ src: currentPath, stem: file.basename, width: this.settings.imageWidth })
+			: desiredLinkText
+		const figureImageLine = asFigure ? replacement.split('\n')[1] : ''
+		const result = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
+			if (!this.isCurrent(generation)) return null
+			const liveEditor = this.getActiveEditor()
+			if (!liveEditor || this.getActiveFile()?.path !== sourcePath) return null
+			const lineCount = liveEditor.lineCount()
+			if (nativeLinkSyncState !== 'old') {
+				const editorState = this.referenceStateNearEditor(
+					cursor,
+					lineCount,
+					line => liveEditor.getLine(line),
+					targetGroups,
+					image,
+				)
+				if (nativeLinkSyncDecision(nativeLinkSyncState, editorState) !== 'proceed') {
+					if (attempt + 1 < FIGURE_RETRY_COUNT) {
+						await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
+					}
+					return null
+				}
+			}
+			const anchorLine = Math.max(0, Math.min(cursor.line, lineCount - 1))
+			const firstLine = Math.max(0, anchorLine - BOUNDED_SEARCH_RADIUS)
+			const sliceStartLine = firstLine > 0 ? firstLine - 1 : 0
+			const initialContext = markdownDocumentContextBefore(Array.from({ length: sliceStartLine }, (_, line) => liveEditor.getLine(line)))
+			const edit = replaceNearCursorInText(
+				cursor,
+				lineCount,
+				(content, contentCursor) => replaceAttachmentReference({
+					content,
+					cursor: contentCursor,
+					targetPaths,
+					currentTargetPaths: targetGroups.current,
+					replacement,
+					replacementPath,
+					image,
+					asFigure,
+					figureImageLine,
+					initialContext,
+				}),
+				line => liveEditor.getLine(line),
+			)
+			if (!edit) {
+				if (attempt + 1 < FIGURE_RETRY_COUNT) {
+					await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
+				}
+				return null
+			}
+			if (edit.matched) return { edit: null, matched: true }
+			if (!this.isCurrent(generation)) return null
+			liveEditor.transaction({
+				changes: [{
+					from: { line: edit.line, ch: edit.start },
+					to: { line: edit.endLine, ch: edit.endCh },
+					text: edit.text,
+				}],
+			})
+			return { edit, matched: true }
+		}, () => !this.isCurrent(generation))
+		if (result?.matched) return result
+		if (this.isCurrent(generation)) {
+			new Notice('Could not update attachment embed; keeping the existing content')
+		}
+		return { matched: false, edit: null }
+	}
+
+	openRenameModal(task: RenameTask, hasRemaining: boolean, generation = this.cancellation.generation): Promise<ModalChoice> {
+		return new Promise(resolve => {
+			if (!this.isCurrent(generation)) {
+				resolve({ action: 'cancel', applyToRemaining: true })
+				return
+			}
+			let settled = false
+			const finish = (choice: ModalChoice) => {
+				if (settled) return
+				settled = true
+				resolve(choice)
+			}
+			const modal = new ImageRenameModal(this.app, task.file, task.stem, hasRemaining, this.attachmentTypes, finish, () => {
+				const index = this.modals.indexOf(modal)
+				if (index >= 0) this.modals.splice(index, 1)
+			})
+			this.modals.push(modal)
+			modal.open()
+			debugLog('modals count', this.modals.length)
+		})
 	}
 
 	openBatchRenameModal() {
 		const activeFile = this.getActiveFile()
+		if (!activeFile) {
+			new Notice('Error: No active file found.')
+			return
+		}
+		const editorSession = this.getBatchEditorSession(activeFile)
+		if (!editorSession) {
+			new Notice('Could not capture the active note editor')
+			return
+		}
+		const generation = this.cancellation.generation
 		const modal = new ImageBatchRenameModal(
 			this.app,
-			activeFile,
+			() => this.scanBatchAttachments(activeFile, editorSession, generation),
 			async (file: TFile, name: string) => {
-				await this.renameFile(file, name, activeFile.path)
+				return this.renameBatchAttachment(file, name, activeFile, editorSession, generation)
 			},
 			() => {
-				this.modals.splice(this.modals.indexOf(modal), 1)
+				const index = this.modals.indexOf(modal)
+				if (index >= 0) this.modals.splice(index, 1)
 			}
 		)
 		this.modals.push(modal)
@@ -235,30 +562,324 @@ export default class PasteRenamePlugin extends Plugin {
 
 	async batchRenameAllImages() {
 		const activeFile = this.getActiveFile()
-		const fileCache = this.app.metadataCache.getFileCache(activeFile)
-		if (!fileCache || !fileCache.embeds) return
-		const extPatternRegex = /jpe?g|png|gif|tiff|webp/i
-
-		for (const embed of fileCache.embeds) {
-			const file = this.app.metadataCache.getFirstLinkpathDest(embed.link, activeFile.path)
-			if (!file) {
-				console.warn('file not found', embed.link)
-				return
-			}
-			// match ext
-			const m0 = extPatternRegex.exec(file.extension)
-			if (!m0) return
+		if (!activeFile) {
+			new Notice('Error: No active file found.')
+			return
+		}
+		const editorSession = this.getBatchEditorSession(activeFile)
+		if (!editorSession) {
+			new Notice('Could not capture the active note editor')
+			return
+		}
+		const generation = this.cancellation.generation
+		const groups = await this.scanBatchAttachments(activeFile, editorSession, generation)
+		if (!this.isCurrent(generation) || !groups) return
+		for (const group of groups) {
+			if (!this.isCurrent(generation)) return
+			const file = group.file
+			if (!isImageExtension(file.extension, this.attachmentTypes)) return
 
 			// rename
 			const { newName, isMeaningful }= this.generateNewName(file, activeFile)
 			debugLog('generated newName:', newName, isMeaningful)
 			if (!isMeaningful) {
+				if (!this.isCurrent(generation)) return
 				new Notice('Failed to batch rename images: the generated name is not meaningful')
 				break;
 			}
 
-			await this.renameFile(file, newName, activeFile.path, false)
+			if (!await this.renameBatchAttachment(file, newName, activeFile, editorSession, generation)) return
 		}
+	}
+
+	async prepareBatchSource(
+		sourceFile: TFile,
+		session: BatchEditorSession<Editor, MarkdownView>,
+		generation: number,
+	): Promise<BatchSourceSnapshot | null> {
+		if (!this.isBatchEditorSessionBound(session, sourceFile) || !this.isCurrent(generation)) {
+			if (this.isCurrent(generation)) new Notice('Could not capture the active note editor')
+			return null
+		}
+		const snapshot = session.editor.getValue()
+		const baselineContent = session.baselineContent
+		let disk: string
+		try {
+			disk = await this.app.vault.read(sourceFile)
+		} catch (error) {
+			if (this.isCurrent(generation)) {
+				console.error('Could not read active note before batch rename', error)
+				new Notice('Could not read the active note before batch rename')
+			}
+			return null
+		}
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+		const snapshotFromCache = (cache: CachedMetadata): BatchSourceSnapshot => {
+			const embeds = cacheEmbedOccurrences(snapshot, cache.embeds ?? [])
+			const references = cacheReferenceOccurrences(snapshot, [...(cache.embeds ?? []), ...(cache.links ?? [])])
+			return { content: snapshot, embeds, references }
+		}
+		try {
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+			if (snapshot === disk) {
+				const cached = this.metadataLedger.exact(sourceFile.path, snapshot)
+				if (cached) {
+					if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return null
+					return snapshotFromCache(cached)
+				}
+			} else {
+				const writeResult = await compareAndWriteVaultText(
+					this.app.vault,
+					sourceFile,
+					content => content === baselineContent || content === snapshot,
+					() => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
+					snapshot,
+				)
+				if (writeResult !== 'written') {
+					if (this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
+					return null
+				}
+				if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return null
+				if (!this.isCurrent(generation)) return null
+			}
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+			const synced = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
+				if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+				const cache = this.metadataLedger.exact(sourceFile.path, snapshot)
+				if (cache) {
+					try {
+						if (await this.app.vault.read(sourceFile) !== snapshot) {
+							if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
+							return null
+						}
+					} catch {
+						return null
+					}
+					return cache
+				}
+				if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
+				return null
+			}, () => !this.isCurrent(generation))
+			if (!synced) {
+				if (this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
+				return null
+			}
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+			advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)
+			return snapshotFromCache(synced)
+		} catch (error) {
+			if (this.isCurrent(generation)) {
+				console.error('Could not synchronize active note before batch rename', error)
+				new Notice('Could not synchronize the active note before batch rename')
+			}
+			return null
+		}
+	}
+
+	async scanBatchAttachments(
+		sourceFile: TFile,
+		session: BatchEditorSession<Editor, MarkdownView>,
+		generation: number,
+	): Promise<CachedAttachmentGroup<TFile>[] | null> {
+		const prepared = await this.prepareBatchSource(sourceFile, session, generation)
+		if (!prepared || !this.isCurrent(generation)) return null
+		const groups = groupCachedAttachments<TFile>(
+			prepared.content,
+			prepared.embeds,
+			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
+		const grouped = new Map(groups.map(group => [group.file.path, group]))
+		for (const link of extractGeneratedFigurePaths(prepared.content)) {
+			const file = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
+			if (file && isEligibleAttachmentExtension(file.extension, this.attachmentTypes) && !grouped.has(file.path)) grouped.set(file.path, { file })
+		}
+		return [...grouped.values()]
+	}
+
+	async renameBatchAttachment(
+		file: TFile,
+		newName: string,
+		sourceFile: TFile,
+		editorSession: BatchEditorSession<Editor, MarkdownView>,
+		generation = this.cancellation.generation,
+	): Promise<boolean> {
+		const prepared = await this.prepareBatchSource(sourceFile, editorSession, generation)
+		if (!prepared || !this.isCurrent(generation)) return false
+		const freshGroups = groupCachedAttachments<TFile>(
+			prepared.content,
+			prepared.embeds,
+			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
+		const generatedPaths = extractGeneratedFigurePaths(prepared.content).filter(link => {
+			const generatedFile = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
+			return generatedFile !== null && isEligibleAttachmentExtension(generatedFile.extension, this.attachmentTypes)
+		})
+		if (!attachmentTargetDiscovered(
+			freshGroups,
+			generatedPaths,
+			file.path,
+			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+		)) {
+			if (this.isCurrent(generation)) new Notice(`Could not revalidate ${file.name} in the active note`)
+			return false
+		}
+		const oldOccurrences = prepared.references.filter(occurrence =>
+			this.app.metadataCache.getFirstLinkpathDest(occurrence.link, sourceFile.path)?.path === file.path)
+		const oldPath = file.path
+		const oldStem = file.basename
+		const renameResult = await this.renameFile(file, newName, sourceFile.path, false, undefined, generation)
+		if (!renameResult.success) return false
+		if (!this.isCurrent(generation)) return false
+		if (file.path === oldPath) return true
+		if (!this.isCurrent(generation)) return false
+		const oldRelativePath = relativeAttachmentPath(sourceFile.path, oldPath)
+		const newRelativePath = relativeAttachmentPath(sourceFile.path, file.path)
+		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourceFile.path)
+		const wikiDestination = this.app.metadataCache.fileToLinktext(file, sourceFile.path, false)
+		const markdownFallback = wikiDestination === file.name || wikiDestination === file.basename
+			? file.name
+			: relativeAttachmentPath(sourceFile.path, file.path)
+		const currentOccurrences = retargetCachedOccurrences(oldOccurrences, deriveRetargetDestinations(wikiDestination, newLinkText, markdownFallback))
+		const expectedNativeContent = expectedBatchNativeContent(prepared.content, oldOccurrences, currentOccurrences)
+		const readiness = await this.waitForBatchEditorContent(editorSession, sourceFile, prepared.content, expectedNativeContent, oldOccurrences.length > 0, generation)
+		if (!this.isCurrent(generation)) return false
+		if (readiness === null) {
+			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return false
+		}
+		if ('detached' in readiness) {
+			if (!this.isCurrent(generation)) return false
+			let contentRejected = false
+			let processResult: 'written' | 'cancelled'
+			try {
+				processResult = await processVaultText(this.app.vault, sourceFile, content => {
+					if (!batchDiskContentAllowed(content, prepared.content, expectedNativeContent)) {
+						contentRejected = true
+						return content
+					}
+					return replaceBatchAttachmentContent(
+						content,
+						oldRelativePath,
+						newRelativePath,
+						oldStem,
+						file.basename,
+						oldOccurrences,
+						currentOccurrences,
+					)
+				}, () => this.isCurrent(generation))
+			} catch (error) {
+				if (this.isCurrent(generation)) {
+					console.error('Could not save synchronized attachment references', error)
+					new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+				}
+				return false
+			}
+			if (processResult === 'cancelled') return false
+			if (contentRejected) {
+				if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+				return false
+			}
+			return this.isCurrent(generation)
+		}
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
+		const capturedContent = editorSession.editor.getValue()
+		if (capturedContent !== prepared.content && capturedContent !== expectedNativeContent) {
+			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return false
+		}
+		const capturedNextContent = replaceBatchAttachmentContent(
+			capturedContent,
+			oldRelativePath,
+			newRelativePath,
+			oldStem,
+			file.basename,
+			oldOccurrences,
+			currentOccurrences,
+		)
+		const capturedChange = liveBatchAttachmentChange(
+			capturedContent,
+			oldRelativePath,
+			newRelativePath,
+			oldStem,
+			file.basename,
+			oldOccurrences,
+			currentOccurrences,
+		)
+		let writeResult: 'written' | 'conflict' | 'cancelled'
+		try {
+			writeResult = await compareAndWriteVaultText(
+				this.app.vault,
+				sourceFile,
+				content => this.isCurrent(generation)
+					&& this.isBatchEditorSessionBound(editorSession, sourceFile)
+					&& editorSession.editor.getValue() === capturedContent
+					&& batchDiskContentAllowed(content, prepared.content, expectedNativeContent),
+				() => this.isCurrent(generation) && this.isBatchEditorSessionBound(editorSession, sourceFile),
+				capturedNextContent,
+				() => {
+					if (!this.isCurrent(generation)
+						|| !this.isBatchEditorSessionBound(editorSession, sourceFile)
+						|| editorSession.editor.getValue() !== capturedContent) return false
+					if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
+					return true
+				},
+			)
+		} catch (error) {
+			if (this.isCurrent(generation)) {
+				console.error('Could not save synchronized attachment references', error)
+				new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			}
+			return false
+		}
+		if (writeResult === 'cancelled') return false
+		if (writeResult === 'conflict') {
+			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return false
+		}
+		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
+		const latestContent = editorSession.editor.getValue()
+		const commitState = batchCommitEditorState(capturedContent, capturedNextContent, latestContent)
+		if (commitState === 'drifted') {
+			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return false
+		}
+		if (commitState === 'captured') {
+			if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
+		}
+		return advanceBatchEditorBaseline(editorSession, sourceFile.path, capturedNextContent, editorSession.view.file?.path, editorSession.view.editor)
+	}
+
+	async waitForBatchEditorContent(
+		session: BatchEditorSession<Editor, MarkdownView>,
+		sourceFile: TFile,
+		baselineContent: string,
+		expectedNativeContent: string,
+		hasReferences: boolean,
+		generation: number,
+	): Promise<BatchEditorReadiness | null> {
+		const ready = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
+			if (!this.isCurrent(generation)) return null
+			if (!this.isBatchEditorSessionBound(session, sourceFile)) return { detached: true as const }
+			let diskContent: string
+			try {
+				diskContent = await this.app.vault.read(sourceFile)
+			} catch {
+				return null
+			}
+			if (!batchDiskContentAllowed(diskContent, baselineContent, expectedNativeContent)) return null
+			if (!this.isCurrent(generation)) return null
+			if (!this.isBatchEditorSessionBound(session, sourceFile)) return { detached: true as const }
+			const editorContent = session.editor.getValue()
+			const diskState = diskContent === baselineContent ? 'old' : diskContent === expectedNativeContent ? 'current' : null
+			const editorState = editorContent === baselineContent ? 'old' : editorContent === expectedNativeContent ? 'current' : 'none'
+			if (!hasReferences || batchNativeLinkSyncDecision(diskState, editorState, attempt + 1 === FIGURE_RETRY_COUNT) === 'proceed') return { ready: true as const }
+			if (attempt + 1 < FIGURE_RETRY_COUNT) {
+				await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
+				if (!this.isCurrent(generation)) return null
+			}
+			return null
+		}, () => !this.isCurrent(generation))
+		return ready
 	}
 
 	// returns a new name for the input file, with extension
@@ -276,7 +897,7 @@ export default class PasteRenamePlugin extends Plugin {
 			console.warn('could not get file cache from active file', activeFile.name)
 		}
 
-		const stem = renderTemplate(
+		const stem = normalizeFilenameStem(renderTemplate(
 			this.settings.imageNamePattern,
 			{
 				imageNameKey,
@@ -284,13 +905,12 @@ export default class PasteRenamePlugin extends Plugin {
 				dirName: activeFile.parent.name,
 				firstHeading,
 			},
-			frontmatter)
-		const meaninglessRegex = new RegExp(`[${this.settings.dupNumberDelimiter}\\s]`, 'gm')
+			frontmatter))
 
 		return {
 			stem,
-			newName: stem + '.' + file.extension,
-			isMeaningful: stem.replace(meaninglessRegex, '') !== '',
+			newName: `${stem}.${file.extension}`,
+			isMeaningful: stem !== '',
 		}
 	}
 
@@ -358,13 +978,31 @@ export default class PasteRenamePlugin extends Plugin {
 		debugLog('active file', file?.path)
 		return file
 	}
+	getBatchEditorSession(file: TFile): BatchEditorSession<Editor, MarkdownView> | null {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView)
+		return view?.file?.path === file.path ? { filePath: file.path, editor: view.editor, view, baselineContent: view.data } : null
+	}
+	isBatchEditorSessionBound(session: BatchEditorSession<Editor, MarkdownView>, sourceFile: TFile): boolean {
+		return hasBatchEditorOwnership(session, sourceFile.path, session.view.file?.path, session.view.editor)
+	}
 	getActiveEditor() {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView)
 		return view?.editor
 	}
 
+	isCurrent(generation: number): boolean {
+		return !isBurstCancelled(this.cancellation, generation)
+	}
+
 	onunload() {
-		this.modals.map(modal => modal.close())
+		cancelBurst(this.cancellation)
+		this.metadataLedger.clear()
+		if (this.burstTimer !== null) window.clearTimeout(this.burstTimer)
+		this.burstTimer = null
+		this.pendingRenameRequests = []
+		const modals = this.modals.slice()
+		this.modals = []
+		for (const modal of modals) modal.close()
 	}
 
 	testExcludeExtension(file: TFile): boolean {
@@ -373,8 +1011,91 @@ export default class PasteRenamePlugin extends Plugin {
 		return new RegExp(pattern).test(file.extension)
 	}
 
+	attachmentTypesPath(): string {
+		return `${this.manifest.dir}/attachment-types.json`
+	}
+
+	attachmentTypesDefaultPath(): string {
+		return `${this.manifest.dir}/attachment-types.default.json`
+	}
+
+	async loadAttachmentTypes(generation = this.cancellation.generation) {
+		let user: AttachmentTypeUserSource
+		try {
+			const exists = await this.app.vault.adapter.exists(this.attachmentTypesPath())
+			if (!this.isCurrent(generation)) return
+			if (!exists) {
+				user = { status: 'missing' }
+			} else {
+				try {
+					user = { status: 'read', text: await this.app.vault.adapter.read(this.attachmentTypesPath()) }
+					if (!this.isCurrent(generation)) return
+				} catch {
+					user = { status: 'unreadable' }
+				}
+			}
+		} catch {
+			user = { status: 'unreadable' }
+		}
+		if (!this.isCurrent(generation)) return
+
+		let shippedText: string | null = null
+		if (user.status === 'missing') {
+			try {
+				shippedText = await this.app.vault.adapter.read(this.attachmentTypesDefaultPath())
+			} catch {
+				shippedText = null
+			}
+			if (!this.isCurrent(generation)) return
+		}
+
+		const selection = chooseAttachmentTypeConfig(user, shippedText)
+		this.attachmentTypes = cloneAttachmentTypeConfig(selection.config)
+		this.attachmentTypePersistence.current = cloneAttachmentTypeConfig(this.attachmentTypes)
+		commitAttachmentTypeSnapshot(this.attachmentTypePersistence, this.attachmentTypes)
+		if (selection.invalidUserFile) {
+			new Notice('Invalid attachment types; using defaults without overwriting the file')
+			return
+		}
+		if (selection.unreadableUserFile) {
+			new Notice('Could not read attachment types; using defaults without overwriting the file')
+			return
+		}
+		if (selection.createUserFile) {
+			try {
+				await this.saveAttachmentTypes(this.attachmentTypes)
+				if (this.isCurrent(generation)) new Notice('Attachment types file missing; created defaults')
+			} catch (error) {
+				if (this.isCurrent(generation)) new Notice(`Could not create attachment types: ${error}`)
+			}
+		}
+	}
+
+	async saveAttachmentTypes(config = this.attachmentTypes, revision = this.attachmentTypePersistence.revision) {
+		const snapshot = cloneAttachmentTypeConfig(config)
+		try {
+			await this.attachmentTypeWrites.enqueue(snapshot, async queuedSnapshot => {
+				await this.app.vault.adapter.write(this.attachmentTypesPath(), `${JSON.stringify(queuedSnapshot, null, 2)}\n`)
+			})
+			commitAttachmentTypeSnapshot(this.attachmentTypePersistence, snapshot)
+		} catch (error) {
+			reconcileAttachmentTypeFailure(this.attachmentTypePersistence, revision)
+			this.attachmentTypes = cloneAttachmentTypeConfig(this.attachmentTypePersistence.current)
+			throw error
+		}
+	}
+
+	async resetAttachmentTypes() {
+		const revision = applyAttachmentTypeSnapshot(this.attachmentTypePersistence, DEFAULT_ATTACHMENT_TYPE_CONFIG)
+		this.attachmentTypes = cloneAttachmentTypeConfig(this.attachmentTypePersistence.current)
+		await this.saveAttachmentTypes(this.attachmentTypes, revision)
+	}
+
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const stored = await this.loadData()
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, stored)
+		this.settings.imageOutput = resolveImageOutput(stored, DEFAULT_SETTINGS.imageOutput)
+		if (typeof this.settings.imageWidth !== 'number' || !Number.isFinite(this.settings.imageWidth)) this.settings.imageWidth = DEFAULT_SETTINGS.imageWidth
 	}
 
 	async saveSettings() {
@@ -404,20 +1125,7 @@ function isPastedImage(file: TAbstractFile): boolean {
 
 function isMarkdownFile(file: TAbstractFile): boolean {
 	if (file instanceof TFile) {
-		if (file.extension === 'md') {
-			return true
-		}
-	}
-	return false
-}
-
-const IMAGE_EXTS = [
-	'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg',
-]
-
-function isImage(file: TAbstractFile): boolean {
-	if (file instanceof TFile) {
-		if (IMAGE_EXTS.contains(file.extension.toLowerCase())) {
+		if (file.extension.toLowerCase() === 'md') {
 			return true
 		}
 	}
@@ -427,34 +1135,36 @@ function isImage(file: TAbstractFile): boolean {
 class ImageRenameModal extends Modal {
 	src: TFile
 	stem: string
-	renameFunc: (path: string) => void
+	hasRemaining: boolean
+	attachmentTypes: AttachmentTypeConfig
+	finish: (choice: ModalChoice) => void
 	onCloseExtra: () => void
+	settled = false
+	applyToRemaining = false
 
-	constructor(app: App, src: TFile, stem: string, renameFunc: (path: string) => void, onClose: () => void) {
-		super(app);
+	constructor(app: App, src: TFile, stem: string, hasRemaining: boolean, attachmentTypes: AttachmentTypeConfig, finish: (choice: ModalChoice) => void, onClose: () => void) {
+		super(app)
 		this.src = src
 		this.stem = stem
-		this.renameFunc = renameFunc
+		this.hasRemaining = hasRemaining
+		this.attachmentTypes = attachmentTypes
+		this.finish = finish
 		this.onCloseExtra = onClose
 	}
 
 	onOpen() {
 		this.containerEl.addClass('image-rename-modal')
-		const { contentEl, titleEl } = this;
-		titleEl.setText('Rename image')
+		const { contentEl, titleEl } = this
+		titleEl.setText('Rename attachment')
 
-		const imageContainer = contentEl.createDiv({
-			cls: 'image-container',
-		})
-		imageContainer.createEl('img', {
-			attr: {
-				src: this.app.vault.getResourcePath(this.src),
-			}
-		})
+		if (isImageExtension(this.src.extension, this.attachmentTypes)) {
+			const imageContainer = contentEl.createDiv({ cls: 'image-container' })
+			imageContainer.createEl('img', { attr: { src: this.app.vault.getResourcePath(this.src) } })
+		}
 
 		let stem = this.stem
 		const ext = this.src.extension
-		const getNewName = (stem: string) => stem + '.' + ext
+		const getNewName = (stem: string) => ext ? `${stem}.${ext}` : stem
 		const getNewPath = (stem: string) => path.join(this.src.parent.path, getNewName(stem))
 
 		const infoET = createElementTree(contentEl, {
@@ -490,18 +1200,26 @@ class ImageRenameModal extends Modal {
 			]
 		})
 
-		const doRename = async () => {
-			debugLog('doRename', `stem=${stem}`)
-			this.renameFunc(getNewName(stem))
+		const errorEl = contentEl.createDiv({ cls: 'error', attr: { style: 'display: none;' } })
+		const finish = (action: 'rename' | 'cancel') => {
+			if (this.settled) return
+			if (action === 'rename' && !stem) {
+				errorEl.innerText = 'Error: "New name" could not be empty'
+				errorEl.style.display = 'block'
+				return
+			}
+			this.settled = true
+			this.finish({ action, name: action === 'rename' ? getNewName(stem) : undefined, applyToRemaining: this.applyToRemaining })
+			this.close()
 		}
 
 		const nameSetting = new Setting(contentEl)
 			.setName('New name')
-			.setDesc('Please input the new name for the image (without extension)')
+			.setDesc('Input the new attachment name without its extension')
 			.addText(text => text
 				.setValue(stem)
-				.onChange(async (value) => {
-					stem = sanitizer.filename(value)
+				.onChange((value) => {
+					stem = normalizeFilenameStem(value)
 					infoET.children[1].children[1].el.innerText = getNewPath(stem)
 				}
 				))
@@ -509,46 +1227,30 @@ class ImageRenameModal extends Modal {
 		const nameInputEl = nameSetting.controlEl.children[0] as HTMLInputElement
 		nameInputEl.focus()
 		const nameInputState = lockInputMethodComposition(nameInputEl)
-		nameInputEl.addEventListener('keydown', async (e) => {
-			// console.log('keydown', e.key, `lock=${nameInputState.lock}`)
+		nameInputEl.addEventListener('keydown', (e) => {
 			if (e.key === 'Enter' && !nameInputState.lock) {
 				e.preventDefault()
-				if (!stem) {
-					errorEl.innerText = 'Error: "New name" could not be empty'
-					errorEl.style.display = 'block'
-					return
-				}
-				doRename()
-				this.close()
+				finish('rename')
 			}
 		})
 
-		const errorEl = contentEl.createDiv({
-			cls: 'error',
-			attr: {
-				style: 'display: none;',
-			}
-		})
+		if (this.hasRemaining) {
+			new Setting(contentEl)
+				.setName('Apply to remaining files')
+				.addToggle(toggle => toggle.setValue(false).onChange(value => { this.applyToRemaining = value }))
+		}
 
 		new Setting(contentEl)
-			.addButton(button => {
-				button
-					.setButtonText('Rename')
-					.onClick(() => {
-						doRename()
-						this.close()
-					})
-			})
-			.addButton(button => {
-				button
-					.setButtonText('Cancel')
-					.onClick(() => { this.close() })
-			})
+			.addButton(button => button.setButtonText('Rename').onClick(() => finish('rename')))
+			.addButton(button => button.setButtonText('Cancel').onClick(() => finish('cancel')))
 	}
 
 	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
+		if (!this.settled) {
+			this.settled = true
+			this.finish({ action: 'cancel', applyToRemaining: this.applyToRemaining })
+		}
+		this.contentEl.empty()
 		this.onCloseExtra()
 	}
 }
@@ -576,6 +1278,31 @@ class SettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	async updateSetting<K extends keyof PluginSettings>(field: K, value: PluginSettings[K]): Promise<void> {
+		this.plugin.settings[field] = value
+		await this.plugin.saveSettings()
+	}
+
+	async updateAttachmentTypes(field: 'images' | 'attachments', value: string) {
+		const candidate = {
+			...this.plugin.attachmentTypes,
+			[field]: parseAttachmentTypeTextarea(value),
+		}
+		const result = parseAttachmentTypeConfig(candidate)
+		if (result.ok === false) {
+			new Notice(`Invalid attachment types: ${result.error}`)
+			return
+		}
+		const revision = applyAttachmentTypeSnapshot(this.plugin.attachmentTypePersistence, result.value)
+		this.plugin.attachmentTypes = cloneAttachmentTypeConfig(this.plugin.attachmentTypePersistence.current)
+		try {
+			await this.plugin.saveAttachmentTypes(this.plugin.attachmentTypes, revision)
+		} catch (error) {
+			this.plugin.attachmentTypes = cloneAttachmentTypeConfig(this.plugin.attachmentTypePersistence.current)
+			new Notice(`Could not save attachment types: ${error}`)
+		}
+	}
+
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
@@ -587,22 +1314,34 @@ class SettingTab extends PluginSettingTab {
 			.addText(text => text
 				.setPlaceholder('{{imageNameKey}}')
 				.setValue(this.plugin.settings.imageNamePattern)
-				.onChange(async (value) => {
-					this.plugin.settings.imageNamePattern = value;
-					await this.plugin.saveSettings();
-				}
+				.onChange(value => this.updateSetting('imageNamePattern', value)
 			));
+
+		new Setting(containerEl)
+			.setName('Image output')
+			.setDesc('Use centered HTML figures or preserve Obsidian Markdown embeds for configured image types.')
+			.addDropdown(dropdown => dropdown
+				.addOptions({ html: 'HTML figure', markdown: 'Markdown' })
+				.setValue(this.plugin.settings.imageOutput)
+				.onChange((value: 'html' | 'markdown') => this.updateSetting('imageOutput', value)))
+
+		new Setting(containerEl)
+			.setName('Figure width')
+			.setDesc('Integer percentage from 1 to 100; invalid values render at 80%.')
+			.addText(text => text
+				.setValue(String(this.plugin.settings.imageWidth))
+				.onChange(async value => {
+					const width = Number(value)
+					if (Number.isFinite(width)) this.plugin.settings.imageWidth = width
+					await this.plugin.saveSettings()
+				}))
 
 		new Setting(containerEl)
 			.setName('Duplicate number at start (or end)')
 			.setDesc(`If enabled, duplicate number will be added at the start as prefix for the image name, otherwise it will be added at the end as suffix for the image name.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.dupNumberAtStart)
-				.onChange(async (value) => {
-					this.plugin.settings.dupNumberAtStart = value
-					await this.plugin.saveSettings()
-				}
-				))
+				.onChange(value => this.updateSetting('dupNumberAtStart', value)))
 
 		new Setting(containerEl)
 			.setName('Duplicate number delimiter')
@@ -620,35 +1359,21 @@ class SettingTab extends PluginSettingTab {
 			.setDesc(`If enabled, duplicate number will always be added to the image name. Otherwise, it will only be added when the name is duplicated.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.dupNumberAlways)
-				.onChange(async (value) => {
-					this.plugin.settings.dupNumberAlways = value
-					await this.plugin.saveSettings()
-				}
-				))
+				.onChange(value => this.updateSetting('dupNumberAlways', value)))
 
 		new Setting(containerEl)
 			.setName('Auto rename')
 			.setDesc(`By default, the rename modal will always be shown to confirm before renaming, if this option is set, the image will be auto renamed after pasting.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.autoRename)
-				.onChange(async (value) => {
-					this.plugin.settings.autoRename = value;
-					await this.plugin.saveSettings();
-				}
-			));
+				.onChange(value => this.updateSetting('autoRename', value)))
 
 		new Setting(containerEl)
 			.setName('Handle all attachments')
-			.setDesc(`By default, the plugin only handles images that starts with "Pasted image " in name,
-			which is the prefix Obsidian uses to create images from pasted content.
-			If this option is set, the plugin will handle all attachments that are created in the vault.`)
+			.setDesc(`Pasted images are handled when their extension is allowlisted. Enable this for other allowlisted attachments.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.handleAllAttachments)
-				.onChange(async (value) => {
-					this.plugin.settings.handleAllAttachments = value;
-					await this.plugin.saveSettings();
-				}
-			));
+				.onChange(value => this.updateSetting('handleAllAttachments', value)))
 
 		new Setting(containerEl)
 			.setName('Exclude extension pattern')
@@ -658,11 +1383,7 @@ class SettingTab extends PluginSettingTab {
 			.addTextArea(text => text
 				.setPlaceholder('docx?|xlsx?|pptx?|zip|rar')
 				.setValue(this.plugin.settings.excludeExtensionPattern)
-				.onChange(async (value) => {
-					this.plugin.settings.excludeExtensionPattern = value;
-					await this.plugin.saveSettings();
-				}
-			));
+				.onChange(value => this.updateSetting('excludeExtensionPattern', value)))
 
 		new Setting(containerEl)
 			.setName('Disable rename notice')
@@ -670,10 +1391,32 @@ class SettingTab extends PluginSettingTab {
 			Note that Obsidian may display a notice when a link has changed, this option cannot disable that.`)
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.disableRenameNotice)
-				.onChange(async (value) => {
-					this.plugin.settings.disableRenameNotice = value;
-					await this.plugin.saveSettings();
+				.onChange(value => this.updateSetting('disableRenameNotice', value)))
+
+		new Setting(containerEl)
+			.setName('Image extensions')
+			.setDesc('Comma-separated allowlist. Leading dots are optional; entries are lowercased and deduplicated.')
+			.addTextArea(text => text
+				.setValue(this.plugin.attachmentTypes.images.join(', '))
+				.onChange(value => this.updateAttachmentTypes('images', value)))
+
+		new Setting(containerEl)
+			.setName('Attachment extensions')
+			.setDesc('Comma-separated allowlist for non-image attachments. Unknown extensions remain ignored.')
+			.addTextArea(text => text
+				.setValue(this.plugin.attachmentTypes.attachments.join(', '))
+				.onChange(value => this.updateAttachmentTypes('attachments', value)))
+
+		new Setting(containerEl)
+			.setName('Attachment type defaults')
+			.setDesc('Reset the editable allowlist and write the checked-in defaults to the plugin configuration file.')
+			.addButton(button => button.setButtonText('Reset defaults').onClick(async () => {
+				try {
+					await this.plugin.resetAttachmentTypes()
+					this.display()
+				} catch (error) {
+					new Notice(`Could not save attachment types: ${error}`)
 				}
-			));
+			}))
 	}
 }

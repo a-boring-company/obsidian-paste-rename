@@ -1,19 +1,7 @@
 import { FrontMatterCache } from 'obsidian';
 
-const dateTmplRegex = /{{DATE:([^}]+)}}/gm
-const frontmatterTmplRegex = /{{frontmatter:([^}]+)}}/gm
-
-const replaceDateVar = (s: string, date: moment.Moment): string => {
-	const m = dateTmplRegex.exec(s)
-	if (!m) return s
-	return s.replace(m[0], date.format(m[1]))
-}
-
-const replaceFrontmatterVar = (s: string, frontmatter?: FrontMatterCache): string => {
-	if (!frontmatter) return s
-	const m = frontmatterTmplRegex.exec(s)
-	if (!m) return s
-	return s.replace(m[0], frontmatter[m[1]] || '')
+interface DateFormatter {
+	format(format: string): string
 }
 
 interface TemplateData {
@@ -23,21 +11,22 @@ interface TemplateData {
 	firstHeading: string
 }
 
-export const renderTemplate = (tmpl: string, data: TemplateData, frontmatter?: FrontMatterCache) => {
-	const now = window.moment()
-	let text = tmpl
-	let newtext
-	while ((newtext = replaceDateVar(text, now)) != text) {
-		text = newtext
-	}
-	while ((newtext = replaceFrontmatterVar(text, frontmatter)) != text) {
-		text = newtext
-	}
+const templateTokenRegex = /{{DATE:([^}]+)}}|{{frontmatter:([^}]+)}}|{{(imageNameKey|fileName|dirName|firstHeading)}}/gm
 
-	text = text
-		.replace(/{{imageNameKey}}/gm, data.imageNameKey)
-		.replace(/{{fileName}}/gm, data.fileName)
-		.replace(/{{dirName}}/gm, data.dirName)
-		.replace(/{{firstHeading}}/gm, data.firstHeading)
-	return text
+export const expandTemplate = (
+	tmpl: string,
+	data: TemplateData,
+	frontmatter: FrontMatterCache | undefined,
+	date: DateFormatter,
+) => tmpl.replace(templateTokenRegex, (_match, dateFormat: string, frontmatterKey: string, field: keyof TemplateData) => {
+	if (dateFormat !== undefined) return date.format(dateFormat)
+	if (frontmatterKey !== undefined && frontmatter && Object.prototype.hasOwnProperty.call(frontmatter, frontmatterKey)) {
+		return String(frontmatter[frontmatterKey] ?? '')
+	}
+	if (frontmatterKey !== undefined) return ''
+	return data[field]
+})
+
+export const renderTemplate = (tmpl: string, data: TemplateData, frontmatter?: FrontMatterCache) => {
+	return expandTemplate(tmpl, data, frontmatter, window.moment())
 }

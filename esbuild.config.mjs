@@ -44,10 +44,11 @@ const ctx = await esbuild.context({
 	target: 'es2016',
 	logLevel: "info",
 	sourcemap: prod ? false : 'inline',
+	minify: prod,
 	treeShaking: true,
 	outdir: 'build',
 	legalComments: 'inline',
-	plugins: [runScriptPlugin],
+	plugins: prod ? [] : [runScriptPlugin],
 });
 
 if (prod) {

@@ -1,12 +1,7 @@
-import {
-  App,
-  Vault,
-} from 'obsidian';
-
 export const DEBUG = !(process.env.BUILD_ENV === 'production')
 if (DEBUG) console.log('DEBUG is enabled')
 
-export function debugLog(...args: any[]) {
+export function debugLog(...args: unknown[]) {
 	if (DEBUG) {
 		console.log((new Date()).toISOString().slice(11, 23), ...args)
 	}
@@ -66,8 +61,10 @@ export const path = {
 
 	// return extension without dot, e.g. 'jpg'
 	extension(fullpath: string): string {
-		const positions = [...fullpath.matchAll(new RegExp('\\.', 'gi'))].map(a => a.index)
-		return fullpath.slice(positions[positions.length - 1] + 1)
+		const basenameStart = fullpath.lastIndexOf('/') + 1
+		const lastDot = fullpath.lastIndexOf('.')
+		if (lastDot <= basenameStart || lastDot === fullpath.length - 1) return ''
+		return fullpath.slice(lastDot + 1)
 	},
 }
 
@@ -109,19 +106,6 @@ export function lockInputMethodComposition(el: HTMLInputElement): CompositionSta
 	return state
 }
 
-
-interface VaultConfig {
-	useMarkdownLinks?: boolean
-}
-
-interface VaultWithConfig extends Vault {
-	config?: VaultConfig,
-}
-
-export function getVaultConfig(app: App): VaultConfig|null {
-	const vault = app.vault as VaultWithConfig
-	return vault.config
-}
 
 export interface NameObj {
 	name: string
