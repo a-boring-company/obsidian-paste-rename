@@ -297,6 +297,34 @@ beforeEach(() => { noticeMessages.length = 0 })
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('PasteRenamePlugin burst notification boundaries', () => {
+	it('keeps deferred create bursts separated by their captured source note', async () => {
+		const { files, plugin, sourceFile } = createHarness(['assets/a.png', 'assets/b.png', 'assets/c.png'])
+		const otherSourceFile = createFile('notes/other.md')
+		plugin.pendingRenameRequests = [
+			request(files[0], sourceFile),
+			request(files[1], otherSourceFile),
+			request(files[2], sourceFile),
+		]
+		const processedSources: string[][] = []
+		vi.spyOn(plugin, 'processRenameBurst').mockImplementation(async requests => {
+			processedSources.push(requests.map(pending => pending.sourcePath))
+		})
+		vi.stubGlobal('window', { setTimeout: vi.fn(() => 1), clearTimeout: vi.fn() })
+		try {
+			await plugin.processPendingBurst()
+			await plugin.processPendingBurst()
+			await plugin.processPendingBurst()
+		} finally {
+			vi.unstubAllGlobals()
+		}
+
+		expect(processedSources).toEqual([
+			[sourceFile.path],
+			[otherSourceFile.path],
+			[sourceFile.path],
+		])
+	})
+
 	it('rejects an exact burst when the active editor changes during source capture', async () => {
 		const paths = ['assets/first.png', 'assets/second.png']
 		const content = paths.map(path => `![[${path}]]`).join('\n')
@@ -358,6 +386,40 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(noticeMessages).toEqual(['Skipped 2 attachments because the active note could not be synchronized'])
 	})
 
+	it('does not roll back a note snapshot that Obsidian autosaved before the exact preflight write', async () => {
+		const paths = ['assets/first.png', 'assets/second.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const originalDisk = 'note text before autosave'
+		const { app, diskContent, editorSession, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: paths,
+			content,
+			diskContent: originalDisk,
+			baselineContent: originalDisk,
+			metadataSeedContent: originalDisk,
+			recordMetadataOnProcess: false,
+		})
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
+		let autosaveBeforeWrite = true
+		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
+			if (autosaveBeforeWrite) {
+				autosaveBeforeWrite = false
+				await originalProcess(file, () => content)
+			}
+			return originalProcess(file, transform)
+		})
+		vi.stubGlobal('window', { setTimeout: (callback: () => void) => { callback(); return 0 } })
+		let prepared
+		try {
+			prepared = await plugin.prepareBatchSourceExact(sourceFile, editorSession, 0)
+		} finally {
+			vi.unstubAllGlobals()
+		}
+
+		expect(prepared).toEqual({ snapshot: null, failure: 'synchronize' })
+		expect(diskContent()).toBe(content)
+	})
+
 	it('leaves editor and disk unchanged when figure commit rejects after transforming', async () => {
 		const paths = ['assets/first.png', 'assets/second.pdf']
 		const content = paths.map(path => `![[${path}]]`).join('\n')
@@ -381,6 +443,42 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(editor.getValue()).toBe(content)
 		expect(diskContent()).toBe(content)
 		expect(noticeMessages).toEqual(['Skipped 1 attachment because the requested change could not be applied.'])
+	})
+
+	it('restores the exact autosaved process input when figure conversion rejects after transforming', async () => {
+		const filePath = 'assets/first.png'
+		const originalDisk = `![[${filePath}]]`
+		const content = `${originalDisk}\nuser autosave`
+		const { app, cacheForContent, diskContent, editor, editorSession, files: [file], plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: [filePath],
+			content,
+			diskContent: originalDisk,
+			baselineContent: originalDisk,
+			imageOutput: 'html',
+		})
+		const occurrences = cacheForContent(content).snapshot.references
+		const task = {
+			...request(file, sourceFile),
+			id: '0', proposedName: file.name, stem: file.basename, isMeaningful: false, occurrences,
+		}
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
+		let autosaveBeforeWrite = true
+		vi.spyOn(vault, 'process').mockImplementation(async (target, transform) => {
+			if (autosaveBeforeWrite) {
+				autosaveBeforeWrite = false
+				await originalProcess(target, () => content)
+				const result = await originalProcess(target, transform)
+				throw new Error(`rejected after transforming ${result.length} characters`)
+			}
+			return originalProcess(target, transform)
+		})
+
+		const outcome = await plugin.convertBatchAttachmentToFigure(task, sourceFile, editorSession, 0)
+
+		expect(outcome).toBe(false)
+		expect(editor.getValue()).toBe(content)
+		expect(diskContent()).toBe(content)
 	})
 
 	it('reports a partial figure mutation when guarded compensation cannot restore disk', async () => {
@@ -467,6 +565,36 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 
 		expect(editor.getValue()).toContain(content)
 		expect(editor.getValue().match(/<figure style="text-align: center;">/g)).toHaveLength(1)
+	})
+
+	it.each([
+		['Wikilink', '[[assets/linked.png]]'],
+		['Markdown link', '[Image](assets/linked.png)'],
+	] as const)('treats cancel as successful for an ordinary image %s', async (_label, ordinaryLink) => {
+		const paths = ['assets/linked.png', 'assets/embedded.png']
+		const content = `${ordinaryLink}\n![[${paths[1]}]]`
+		const { editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'html' })
+		const metadata = plugin.metadataLedger.exact(sourceFile.path, content)
+		if (metadata) {
+			const link = {
+				link: paths[0], original: ordinaryLink,
+				position: {
+					start: { line: 0, col: 0, offset: 0 },
+					end: { line: 0, col: ordinaryLink.length, offset: ordinaryLink.length },
+				},
+			}
+			plugin.metadataLedger.record(sourceFile.path, content, { ...metadata, links: [link] } as never)
+		}
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+		const conversions = vi.spyOn(plugin, 'convertBatchAttachmentToFigure')
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(conversions.mock.calls.map(call => call[0].file.path)).toEqual([paths[1]])
+		expect(editor.getValue()).toContain(ordinaryLink)
+		expect(editor.getValue().match(/<figure style="text-align: center;">/g)).toHaveLength(1)
+		expect(noticeMessages).toEqual([])
 	})
 
 	it('revalidates and renames exact non-image cache.links attachments', async () => {

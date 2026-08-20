@@ -253,8 +253,13 @@ export default class PasteRenamePlugin extends Plugin {
 	async processPendingBurst() {
 		if (this.processingBurst || !this.pendingRenameRequests.length || this.cancellation.cancelled) return
 		this.processingBurst = true
-		const requests = this.pendingRenameRequests.splice(0)
-		const generation = requests[0]?.generation ?? this.cancellation.generation
+		const firstRequest = this.pendingRenameRequests[0]
+		const sharesBurstSource = (request: RenameRequest) => request.generation === firstRequest.generation
+			&& request.sourcePath === firstRequest.sourcePath
+			&& request.sourceFile.path === firstRequest.sourceFile.path
+		const nextSource = this.pendingRenameRequests.findIndex(request => !sharesBurstSource(request))
+		const requests = this.pendingRenameRequests.splice(0, nextSource < 0 ? this.pendingRenameRequests.length : nextSource)
+		const generation = firstRequest.generation
 		try {
 			await this.processRenameBurst(requests, generation)
 		} finally {
@@ -297,7 +302,9 @@ export default class PasteRenamePlugin extends Plugin {
 					link => this.app.metadataCache.getFirstLinkpathDest(link, context.sourceFile.path),
 				).get(task.file.path)
 				if (!occurrences?.length || !this.isCurrent(generation)) return 'not-applied'
-				return this.convertBatchAttachmentToFigure({ ...task, occurrences }, context.sourceFile, context.editorSession, generation)
+				const imageOccurrences = occurrences.filter(occurrence => extractReferencePath(occurrence.original)?.image === true)
+				if (!imageOccurrences.length) return true
+				return this.convertBatchAttachmentToFigure({ ...task, occurrences: imageOccurrences }, context.sourceFile, context.editorSession, generation)
 			},
 			isCurrent: () => this.isCurrent(generation),
 			notify: message => { new Notice(message) },
@@ -344,20 +351,14 @@ export default class PasteRenamePlugin extends Plugin {
 		if (nextContent === null) return false
 		const change = fullDocumentChange(capturedContent, nextContent)
 		if (!change) return true
-		let originalDiskContent: string
-		try {
-			originalDiskContent = await this.app.vault.read(sourceFile)
-		} catch (error) {
-			if (this.isCurrent(generation)) console.error('Could not read synchronized attachment figures', error)
-			return false
-		}
 		const editorStillCaptured = () => this.isCurrent(generation)
 			&& this.isBatchEditorSessionBound(editorSession, sourceFile)
 			&& editorSession.editor.getValue() === capturedContent
-		const rollback = () => rollbackBatchSourceWrite(this.app.vault, sourceFile, nextContent, originalDiskContent)
+		let transformedDiskContent: string | null = null
 		const compensate = async (): Promise<boolean> => {
-			if (await rollback()) return true
-			try { return await this.app.vault.read(sourceFile) === originalDiskContent } catch { return false }
+			if (transformedDiskContent === null || transformedDiskContent === nextContent) return true
+			if (await rollbackBatchSourceWrite(this.app.vault, sourceFile, nextContent, transformedDiskContent)) return true
+			try { return await this.app.vault.read(sourceFile) === transformedDiskContent } catch { return false }
 		}
 		const revertEditorIfCommitted = (): boolean => {
 			if (editorSession.editor.getValue() !== nextContent) return true
@@ -374,7 +375,10 @@ export default class PasteRenamePlugin extends Plugin {
 			writeResult = await compareAndWriteVaultText(
 				this.app.vault,
 				sourceFile,
-				content => content === editorSession.baselineContent || content === capturedContent,
+				content => {
+					transformedDiskContent = content
+					return content === editorSession.baselineContent || content === capturedContent
+				},
 				editorStillCaptured,
 				nextContent,
 			)
@@ -752,16 +756,19 @@ export default class PasteRenamePlugin extends Plugin {
 			disk,
 			isCurrent: () => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
 			isSnapshotCurrent,
-			writeSnapshot: () => compareAndWriteVaultText(
+			writeSnapshot: recordSource => compareAndWriteVaultText(
 				this.app.vault,
 				sourceFile,
-				content => content === baselineContent || content === snapshot,
+				content => {
+					recordSource(content)
+					return content === baselineContent || content === snapshot
+				},
 				isSnapshotCurrent,
 				snapshot,
 			),
 			readExactCache: () => this.metadataLedger.exact(sourceFile.path, snapshot),
 			readDisk: () => this.app.vault.read(sourceFile),
-			rollbackSnapshot: () => rollbackBatchSourceWrite(this.app.vault, sourceFile, snapshot, disk),
+			rollbackSnapshot: sourceContent => rollbackBatchSourceWrite(this.app.vault, sourceFile, snapshot, sourceContent),
 			advanceBaseline: () => isSnapshotCurrent()
 				&& advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor),
 			retries: FIGURE_RETRY_COUNT,

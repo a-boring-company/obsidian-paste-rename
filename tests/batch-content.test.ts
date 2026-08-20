@@ -72,8 +72,9 @@ describe('batch source content', () => {
 			snapshot: 'editor snapshot',
 			disk: 'editor baseline',
 			isCurrent: () => true,
-			writeSnapshot: async () => {
+			writeSnapshot: async recordSource => {
 				writes += 1
+				recordSource(disk)
 				return compareAndWriteVaultText(vault, file, content => content === 'editor baseline', () => true, 'editor snapshot')
 			},
 			readExactCache: (): null => {
@@ -81,7 +82,7 @@ describe('batch source content', () => {
 				return null
 			},
 			readDisk: async () => disk,
-			rollbackSnapshot: () => rollbackBatchSourceWrite(vault, file, 'editor snapshot', 'editor baseline'),
+			rollbackSnapshot: sourceContent => rollbackBatchSourceWrite(vault, file, 'editor snapshot', sourceContent),
 			advanceBaseline: () => {
 				baselineAdvances += 1
 				return true
@@ -95,6 +96,23 @@ describe('batch source content', () => {
 		expect(cachePolls).toBe(2)
 		expect(disk).toBe('editor baseline')
 		expect(baselineAdvances).toBe(0)
+	})
+
+	it('does not roll back when the guarded write finds the snapshot already autosaved', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => { recordSource('snapshot'); return 'written' },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(0)
 	})
 
 	it('returns the exact cached snapshot and advances the baseline only after disk agreement', async () => {
@@ -155,7 +173,7 @@ describe('batch source content', () => {
 			snapshot: 'snapshot',
 			disk: 'baseline',
 			isCurrent: () => true,
-			writeSnapshot: async () => { throw new Error('write failed') },
+			writeSnapshot: async recordSource => { recordSource('baseline'); throw new Error('write failed') },
 			readExactCache: (): null => null,
 			readDisk: async () => 'snapshot',
 			rollbackSnapshot: async () => { rollbacks += 1; return true },
@@ -177,6 +195,26 @@ describe('batch source content', () => {
 			rollbackSnapshot: async () => { rollbacks += 1; return true },
 			advanceBaseline: () => true,
 		})
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(0)
+	})
+
+	it('returns synchronization when a rejected write left its autosaved source unchanged', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'initial baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => {
+				recordSource('autosaved baseline')
+				throw new Error('write rejected before persistence')
+			},
+			readExactCache: (): null => null,
+			readDisk: async () => 'autosaved baseline',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+
 		expect(result).toEqual({ value: null, failure: 'synchronize' })
 		expect(rollbacks).toBe(0)
 	})
@@ -206,7 +244,7 @@ describe('batch source content', () => {
 			snapshot: 'snapshot',
 			disk: 'baseline',
 			isCurrent: () => true,
-			writeSnapshot: async () => { throw new Error('write rejected after persistence') },
+			writeSnapshot: async recordSource => { recordSource('baseline'); throw new Error('write rejected after persistence') },
 			readExactCache: (): null => null,
 			readDisk: async () => 'snapshot',
 			rollbackSnapshot: async () => { rollbacks += 1; return false },
@@ -223,7 +261,7 @@ describe('batch source content', () => {
 			snapshot: 'snapshot',
 			disk: 'baseline',
 			isCurrent: () => ++checks === 1,
-			writeSnapshot: async () => 'written',
+			writeSnapshot: async recordSource => { recordSource('baseline'); return 'written' },
 			readExactCache: (): null => null,
 			readDisk: async () => 'snapshot',
 			rollbackSnapshot: async () => { rollbacks += 1; return true },
@@ -259,7 +297,7 @@ describe('batch source content', () => {
 			disk: 'baseline',
 			isCurrent: () => true,
 			isSnapshotCurrent: () => current,
-			writeSnapshot: async () => 'written',
+			writeSnapshot: async recordSource => { recordSource('baseline'); return 'written' },
 			readExactCache: () => ({ fingerprint: 'exact' }),
 			readDisk: async () => { current = false; return 'snapshot' },
 			rollbackSnapshot: async () => { rollbacks += 1; return true },
@@ -326,7 +364,7 @@ describe('batch source content', () => {
 			snapshot: 'snapshot',
 			disk: 'baseline',
 			isCurrent: () => true,
-			writeSnapshot: async () => 'written',
+			writeSnapshot: async recordSource => { recordSource('baseline'); return 'written' },
 			readExactCache: (): null => null,
 			readDisk: async () => 'snapshot',
 			rollbackSnapshot: async () => { throw new Error('rollback unavailable') },

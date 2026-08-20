@@ -16,23 +16,23 @@ interface ExactSourcePreflightOptions<T> {
 	disk: string
 	isCurrent: () => boolean
 	isSnapshotCurrent?: () => boolean
-	writeSnapshot: () => Promise<'written' | 'conflict' | 'cancelled'>
+	writeSnapshot: (recordSource: (content: string) => void) => Promise<'written' | 'conflict' | 'cancelled'>
 	readExactCache: () => T | null | Promise<T | null>
 	readDisk: () => Promise<string>
-	rollbackSnapshot: () => Promise<boolean>
+	rollbackSnapshot: (sourceContent: string) => Promise<boolean>
 	advanceBaseline: () => boolean
 	retries?: number
 	wait?: () => Promise<void>
 }
 
 export async function prepareExactSourceSnapshot<T>(options: ExactSourcePreflightOptions<T>): Promise<ExactSourcePreflightResult<T>> {
-	let wroteSnapshot = false
+	let snapshotWriteSource: string | null = null
 	const isSnapshotCurrent = options.isSnapshotCurrent ?? (() => true)
 	const fail = async (failure: ExactSourcePreflightFailure): Promise<ExactSourcePreflightResult<T>> => {
-		if (!wroteSnapshot) return { value: null, failure }
+		if (snapshotWriteSource === null || snapshotWriteSource === options.snapshot) return { value: null, failure }
 		let restored = false
 		try {
-			restored = await options.rollbackSnapshot()
+			restored = await options.rollbackSnapshot(snapshotWriteSource)
 		} catch {
 			// Keep the default rollback failure result.
 		}
@@ -44,7 +44,7 @@ export async function prepareExactSourceSnapshot<T>(options: ExactSourcePrefligh
 		if (options.snapshot !== options.disk) {
 			let writeResult: 'written' | 'conflict' | 'cancelled'
 			try {
-				writeResult = await options.writeSnapshot()
+				writeResult = await options.writeSnapshot(content => { snapshotWriteSource = content })
 			} catch {
 				let persisted: string
 				try {
@@ -53,14 +53,12 @@ export async function prepareExactSourceSnapshot<T>(options: ExactSourcePrefligh
 					return { value: null, failure: 'rollback' }
 				}
 				if (persisted === options.snapshot) {
-					wroteSnapshot = true
 					return fail('synchronize')
 				}
-				if (persisted === options.disk) return { value: null, failure: 'synchronize' }
+				if (persisted === snapshotWriteSource || persisted === options.disk) return { value: null, failure: 'synchronize' }
 				return { value: null, failure: 'rollback' }
 			}
-			if (writeResult !== 'written') return fail(writeResult === 'cancelled' ? 'cancelled' : 'synchronize')
-			wroteSnapshot = true
+			if (writeResult !== 'written') return { value: null, failure: writeResult === 'cancelled' ? 'cancelled' : 'synchronize' }
 			if (!options.isCurrent() || !isSnapshotCurrent()) return fail('cancelled')
 		}
 		const attempts = Math.max(1, options.retries ?? 1)
