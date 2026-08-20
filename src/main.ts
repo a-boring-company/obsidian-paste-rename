@@ -15,7 +15,6 @@ import {
 import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
-import { applyBatchChoice, createBatchChoiceState } from './batch-state';
 import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, liveBatchAttachmentChange, prepareExactSourceSnapshot, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from './batch-content';
 import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
@@ -32,7 +31,7 @@ import {
 	parseAttachmentTypeConfig,
 	parseAttachmentTypeTextarea,
 } from './attachment-types';
-import { cancelBurst, coordinateExactBurstDecisions, createBurstCancellation, ExactBurstMutationStatus, isBurstCancelled, planCreateBurst, summarizeExactBurstOutcome, summarizeExactSourcePreparationFailure } from './burst';
+import { cancelBurst, createBurstCancellation, CreateBurstDecision, ExactBurstMutationStatus, ExactBurstPreparation, isBurstCancelled, orchestrateCreateBurst, summarizeExactSourcePreparationFailure } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
 import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
 import { renderFigure } from './figure';
@@ -132,6 +131,11 @@ type BatchSourcePreparationFailure = 'capture' | 'read' | 'synchronize' | 'rollb
 interface BatchSourcePreparationResult {
 	snapshot: BatchSourceSnapshot | null
 	failure: BatchSourcePreparationFailure | null
+}
+
+interface ExactRenameBurstContext {
+	sourceFile: TFile
+	editorSession: BatchEditorSession<Editor, MarkdownView>
 }
 
 
@@ -269,117 +273,61 @@ export default class PasteRenamePlugin extends Plugin {
 			const generated = this.generateNewName(request.file, request.sourceFile)
 			return { ...request, id: `${index}`, proposedName: generated.newName, stem: generated.stem, isMeaningful: generated.isMeaningful }
 		})
-		if (tasks.length > 1) {
-			await this.processExactRenameBurst(tasks, generation)
-			return
-		}
-		let state = createBatchChoiceState(tasks.map(task => ({ id: task.id, proposedName: task.proposedName })))
 		const taskById = new Map(tasks.map(task => [task.id, task]))
-		while (state.remaining.length) {
-			if (!this.isCurrent(generation)) return
-			const current = taskById.get(state.remaining[0].id)
-			if (!current) break
-			if (current.autoRename && current.isMeaningful) {
-				const result = applyBatchChoice(state, 'rename', { name: current.proposedName })
-				await this.applyRenameDecisions(result.decisions, taskById, generation)
-				state = result.state
-				continue
-			}
-			const choice = await this.openRenameModal(current, state.remaining.length > 1, generation)
-			if (!this.isCurrent(generation)) return
-			const result = applyBatchChoice(state, choice.action, {
-				name: choice.name,
-				applyToRemaining: choice.applyToRemaining,
-			})
-			await this.applyRenameDecisions(result.decisions, taskById, generation)
-			state = result.state
-		}
-	}
-
-	async processExactRenameBurst(tasks: RenameTask[], generation: number): Promise<void> {
-		const sourcePath = tasks[0]?.sourcePath
-		if (!sourcePath || tasks.some(task => task.sourcePath !== sourcePath || task.sourceFile.path !== sourcePath)) {
-			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because their active note changed`)
-			return
-		}
-		const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath)
-		if (!(sourceFile instanceof TFile)) {
-			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because the active note is unavailable`)
-			return
-		}
-		const editorSession = this.getBatchEditorSession(sourceFile)
-		if (!editorSession) {
-			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because the active note editor is unavailable`)
-			return
-		}
-		const prepared = await this.prepareBatchSourceExact(sourceFile, editorSession, generation)
-		if (!prepared.snapshot || !this.isCurrent(generation)) {
-			if (this.isCurrent(generation)) new Notice(summarizeExactSourcePreparationFailure(tasks.length, prepared.failure ?? 'synchronize'))
-			return
-		}
-		const targetPaths = tasks.map(task => task.file.path)
-		const occurrencesByPath = mapCachedOccurrencesByTargetPath(
-			prepared.snapshot.references,
-			targetPaths,
-			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
-		)
-		const plan = planCreateBurst(tasks, occurrencesByPath)
-		if (plan.mode !== 'exact') return
-		if (plan.unresolved.length && this.isCurrent(generation)) {
-			new Notice(`Skipped ${plan.unresolved.length} attachment${plan.unresolved.length === 1 ? '' : 's'} because its cached reference could not be resolved`)
-		}
-		const taskById = new Map(plan.resolved.map(task => [task.id, task]))
-		let state = createBatchChoiceState(plan.resolved.map(task => ({ id: task.id, proposedName: task.proposedName })))
-		while (state.remaining.length) {
-			if (!this.isCurrent(generation)) return
-			const current = taskById.get(state.remaining[0].id)
-			if (!current) break
-			if (current.autoRename && current.isMeaningful) {
-				const result = applyBatchChoice(state, 'rename', { name: current.proposedName })
-				await this.applyExactRenameDecisions(result.decisions, taskById, sourceFile, editorSession, generation)
-				state = result.state
-				continue
-			}
-			const choice = await this.openRenameModal(current, state.remaining.length > 1, generation)
-			if (!this.isCurrent(generation)) return
-			const result = applyBatchChoice(state, choice.action, {
-				name: choice.name,
-				applyToRemaining: choice.applyToRemaining,
-			})
-			await this.applyExactRenameDecisions(result.decisions, taskById, sourceFile, editorSession, generation)
-			state = result.state
-		}
-	}
-
-	async applyExactRenameDecisions(
-		decisions: Array<{ id: string; action: 'rename' | 'cancel'; name: string }>,
-		taskById: Map<string, RenameTask & { occurrences: CachedEmbedOccurrence[] }>,
-		sourceFile: TFile,
-		editorSession: BatchEditorSession<Editor, MarkdownView>,
-		generation: number,
-	): Promise<void> {
-		const tasks = [...taskById.values()]
-		const result = await coordinateExactBurstDecisions(
-			tasks,
-			decisions,
-			async task => {
-				const prepared = await this.prepareBatchSourceExact(sourceFile, editorSession, generation)
+		await orchestrateCreateBurst(tasks, {
+			prepareExact: () => this.prepareExactRenameBurst(tasks, generation),
+			choose: (task, hasRemaining) => this.openRenameModal(task, hasRemaining, generation),
+			applyBounded: (task, decision, notify) => this.applyRenameDecision(task, decision, taskById, generation, notify),
+			refreshOccurrences: async (context, task) => {
+				const prepared = await this.prepareBatchSourceExact(context.sourceFile, context.editorSession, generation)
 				if (!prepared.snapshot || !this.isCurrent(generation)) return null
 				return mapCachedOccurrencesByTargetPath(
 					prepared.snapshot.references,
 					[task.file.path],
-					link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+					link => this.app.metadataCache.getFirstLinkpathDest(link, context.sourceFile.path),
 				).get(task.file.path) ?? null
 			},
-			async (task, occurrences, decision) => {
-				if (decision.action === 'rename') return this.renameBatchAttachmentOutcome(task.file, decision.name, sourceFile, editorSession, generation, false)
+			applyExact: (context, task, occurrences, decision, notify) => {
+				if (decision.action === 'rename') return this.renameBatchAttachmentOutcome(
+					task.file,
+					decision.name,
+					context.sourceFile,
+					context.editorSession,
+					generation,
+					notify,
+				)
 				if (this.settings.imageOutput !== 'html' || !isImageExtension(task.file.extension, this.attachmentTypes)) return true
-				return this.convertBatchAttachmentToFigure({ ...task, occurrences }, sourceFile, editorSession, generation)
+				return this.convertBatchAttachmentToFigure({ ...task, occurrences }, context.sourceFile, context.editorSession, generation)
 			},
-		)
-		const notice = summarizeExactBurstOutcome(result)
-		if (notice && this.isCurrent(generation)) {
-			new Notice(notice)
+			isCurrent: () => this.isCurrent(generation),
+			notify: message => { new Notice(message) },
+		})
+	}
+
+	async prepareExactRenameBurst(tasks: RenameTask[], generation: number): Promise<ExactBurstPreparation<ExactRenameBurstContext>> {
+		const sourcePath = tasks[0]?.sourcePath
+		if (!sourcePath || tasks.some(task => task.sourcePath !== sourcePath || task.sourceFile.path !== sourcePath)) {
+			return { failure: `Skipped ${tasks.length} attachments because their active note changed` }
+		}
+		const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath)
+		if (!(sourceFile instanceof TFile)) {
+			return { failure: `Skipped ${tasks.length} attachments because the active note is unavailable` }
+		}
+		const editorSession = this.getBatchEditorSession(sourceFile)
+		if (!editorSession) {
+			return { failure: `Skipped ${tasks.length} attachments because the active note editor is unavailable` }
+		}
+		const prepared = await this.prepareBatchSourceExact(sourceFile, editorSession, generation)
+		if (!prepared.snapshot || !this.isCurrent(generation)) {
+			return { failure: summarizeExactSourcePreparationFailure(tasks.length, prepared.failure ?? 'synchronize') }
+		}
+		return {
+			context: { sourceFile, editorSession },
+			occurrencesByPath: mapCachedOccurrencesByTargetPath(
+				prepared.snapshot.references,
+				tasks.map(task => task.file.path),
+				link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+			),
 		}
 	}
 
@@ -424,22 +372,20 @@ export default class PasteRenamePlugin extends Plugin {
 		return advanceBatchEditorBaseline(editorSession, sourceFile.path, nextContent, editorSession.view.file?.path, editorSession.view.editor)
 	}
 
-	async applyRenameDecisions(
-		decisions: Array<{ id: string; action: 'rename' | 'cancel'; name: string }>,
+	async applyRenameDecision(
+		task: RenameTask,
+		decision: CreateBurstDecision,
 		taskById: Map<string, RenameTask>,
 		generation = this.cancellation.generation,
+		notify = true,
 	) {
-		for (const decision of decisions) {
-			if (!this.isCurrent(generation)) return
-			const task = taskById.get(decision.id)
-			if (!task) continue
-			if (decision.action === 'rename') {
-				const result = await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation)
-				if (result.success && result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
-			} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
-				const result = await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
-				if (result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
-			}
+		if (!this.isCurrent(generation)) return
+		if (decision.action === 'rename') {
+			const result = await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation, notify)
+			if (result.success && result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
+		} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
+			const result = await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
+			if (result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
 		}
 	}
 

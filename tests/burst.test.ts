@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { cancelBurst, coordinateExactBurstDecisions, createBurstCancellation, isBurstCancelled, planCreateBurst, summarizeExactBurstOutcome, summarizeExactSourcePreparationFailure } from '../src/burst'
+import { cancelBurst, createBurstCancellation, isBurstCancelled, orchestrateCreateBurst, planCreateBurst, summarizeExactBurstOutcome, summarizeExactSourcePreparationFailure } from '../src/burst'
 import { cacheEmbedOccurrences } from '../src/batch-occurrences'
 import { replaceBatchAttachmentContent, replaceBatchFigureContent } from '../src/batch-content'
 import { retargetCachedOccurrences } from '../src/batch-occurrences'
@@ -56,20 +56,7 @@ describe('create burst planning', () => {
 	})
 })
 
-describe('create burst coordination', () => {
-	const occurrence = (content: string, path: string) => {
-		const original = `![[${path}]]`
-		const start = content.indexOf(original)
-		return {
-			link: path,
-			original,
-			start,
-			end: start + original.length,
-			destinationStart: start + 3,
-			destinationEnd: start + 3 + path.length,
-		}
-	}
-
+describe('create burst orchestration', () => {
 	const exactOccurrence = (content: string, path: string) => cacheEmbedOccurrences(content, [{
 		link: path,
 		original: `![[${path}]]`,
@@ -79,105 +66,100 @@ describe('create burst coordination', () => {
 		},
 	}])[0]
 
-	it('keeps one-file routing bounded without invoking exact coordination', async () => {
-		const task = { id: 'one', file: { path: 'assets/one.png' } }
-		const result = planCreateBurst([task], new Map([['assets/one.png', [occurrence('![[assets/one.png]]', 'assets/one.png')]]]))
-		expect(result).toEqual({ mode: 'bounded', tasks: [task] })
+	const task = (id: string, path: string, options: { autoRename?: boolean; meaningful?: boolean } = {}) => ({
+		id,
+		file: { path },
+		proposedName: `${id}.png`,
+		autoRename: options.autoRename ?? false,
+		isMeaningful: options.meaningful ?? true,
 	})
 
-	it('reports one exact synchronization failure while excluding unresolved tasks from decisions', async () => {
-		const first = { id: 'first', file: { path: 'assets/first.png' } }
-		const unresolved = { id: 'missing', file: { path: 'assets/missing.png' } }
-		const refreshed: string[] = []
+	it('routes one file through the bounded path with user notices enabled', async () => {
+		const one = task('one', 'assets/one.png')
 		const applied: string[] = []
-		const plan = planCreateBurst(
-			[first, unresolved],
-			new Map([['assets/first.png', [occurrence('![[assets/first.png]]', 'assets/first.png')]]]),
-		)
-		expect(plan.mode).toBe('exact')
-		if (plan.mode !== 'exact') return
-		expect(plan.unresolved.map(task => task.id)).toEqual(['missing'])
-		const result = await coordinateExactBurstDecisions(
-			plan.resolved,
-			[{ id: 'missing', action: 'cancel', name: '' }, { id: 'first', action: 'rename', name: 'first-new' }],
-			task => {
-			refreshed.push(task.id)
-			return task.id === 'first' ? [occurrence('![[assets/first.png]]', 'assets/first.png')] : null
-		},
-		(task, _occurrences, decision) => {
-			applied.push(`${task.id}:${decision.action}`)
-		},
-		)
-		expect(result.failed).toEqual([])
-		expect(refreshed).toEqual(['first'])
-		expect(applied).toEqual(['first:rename'])
+		const notices: string[] = []
+		const result = await orchestrateCreateBurst([one], {
+			prepareExact: () => { throw new Error('one file must remain bounded') },
+			choose: () => ({ action: 'rename', name: 'chosen.png', applyToRemaining: false }),
+			applyBounded: (current, decision, notify) => { applied.push(`${current.id}:${decision.name}:${notify}`) },
+			refreshOccurrences: () => { throw new Error('bounded routing must not refresh exact occurrences') },
+			applyExact: () => { throw new Error('bounded routing must not apply exact mutations') },
+			isCurrent: () => true,
+			notify: message => { notices.push(message) },
+		})
 
-		const failed = await coordinateExactBurstDecisions(
-			[first, { id: 'last', file: { path: 'assets/last.png' } }],
-			[{ id: 'first', action: 'cancel', name: '' }, { id: 'last', action: 'cancel', name: '' }],
-			task => task.id === 'first' ? null : [occurrence('![[assets/last.png]]', 'assets/last.png')],
-			() => undefined,
-		)
-		expect(failed.failed.map(task => task.id)).toEqual(['first'])
-		expect(failed.applied.map(task => task.id)).toEqual(['last'])
-		const mutationFailure = await coordinateExactBurstDecisions(
-			[first],
-			[{ id: 'first', action: 'rename', name: 'failed' }],
-			task => [occurrence('![[assets/first.png]]', task.file.path)],
-			() => false,
-		)
-		expect(mutationFailure.failed.map(task => task.id)).toEqual(['first'])
+		expect(result).toBeNull()
+		expect(applied).toEqual(['one:chosen.png:true'])
+		expect(notices).toEqual([])
 	})
 
-	it('refreshes exact provenance before each cancel in a cancel-all sequence', async () => {
-		const first = { id: 'first', file: { path: 'assets/first.png' } }
-		const second = { id: 'second', file: { path: 'assets/second.png' } }
+	it('routes multiple files exactly, excludes unresolved tasks, and applies cancel-all silently', async () => {
+		const first = task('first', 'assets/first.png')
+		const second = task('second', 'assets/second.png')
+		const unresolved = task('missing', 'assets/missing.png')
 		let content = '![[assets/first.png]]\n![[assets/second.png]]'
-		const result = await coordinateExactBurstDecisions(
-			[first, second],
-			[{ id: 'first', action: 'cancel', name: '' }, { id: 'second', action: 'cancel', name: '' }],
-			task => cacheEmbedOccurrences(content, [{ link: task.file.path, original: `![[${task.file.path}]]`, position: {
-				start: { line: content.slice(0, content.indexOf(`![[${task.file.path}]]`)).split('\n').length - 1, col: 0, offset: content.indexOf(`![[${task.file.path}]]`) },
-				end: { line: content.slice(0, content.indexOf(`![[${task.file.path}]]`)).split('\n').length - 1, col: `![[${task.file.path}]]`.length, offset: content.indexOf(`![[${task.file.path}]]`) + `![[${task.file.path}]]`.length },
-			} }]),
-			(task, occurrences) => {
-				content = replaceBatchFigureContent(content, `<figure>${task.id}</figure>`, task.file.path, occurrences)
+		const applied: string[] = []
+		const refreshed: string[] = []
+		const notices: string[] = []
+		let choices = 0
+		const result = await orchestrateCreateBurst([first, unresolved, second], {
+			prepareExact: () => ({
+				context: 'exact',
+				occurrencesByPath: new Map([
+					[first.file.path, [exactOccurrence(content, first.file.path)]],
+					[second.file.path, [exactOccurrence(content, second.file.path)]],
+				]),
+			}),
+			choose: () => { choices += 1; return { action: 'cancel', applyToRemaining: true } },
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			refreshOccurrences: (_context, current) => { refreshed.push(current.id); return [exactOccurrence(content, current.file.path)] },
+			applyExact: (_context, current, occurrences, decision, notify) => {
+				applied.push(`${current.id}:${decision.action}:${notify}`)
+				content = replaceBatchFigureContent(content, `<figure>${current.id}</figure>`, current.file.path, occurrences) as string
+				return 'success'
 			},
-		)
-		expect(result.failed).toEqual([])
+			isCurrent: () => true,
+			notify: message => { notices.push(message) },
+		})
+
+		expect(result).toEqual({ applied: [first, second], notApplied: [unresolved], renamedButUnsynchronized: [] })
+		expect(choices).toBe(1)
+		expect(refreshed).toEqual(['first', 'second'])
+		expect(applied).toEqual(['first:cancel:false', 'second:cancel:false'])
 		expect(content).toBe('<figure>first</figure>\n\n<figure>second</figure>')
+		expect(notices).toEqual(['Skipped 1 attachment because the requested change could not be applied.'])
 	})
 
 	it('refreshes the later cancel occurrence after a longer rename link', async () => {
 		const oldPath = 'assets/short.png'
 		const newPath = 'assets/a-much-longer-name.png'
 		const cancelPath = 'assets/cancel.png'
-		const tasks = [
-			{ id: 'rename', file: { path: oldPath } },
-			{ id: 'cancel', file: { path: cancelPath } },
-		]
-		const decisions = [
-			{ id: 'rename', action: 'rename' as const, name: newPath },
-			{ id: 'cancel', action: 'cancel' as const, name: '' },
-		]
+		const tasks = [task('rename', oldPath, { autoRename: true }), task('cancel', cancelPath)]
 		let content = `![[${oldPath}]]\n![[${cancelPath}]]`
 		const applied: string[] = []
-		const result = await coordinateExactBurstDecisions(tasks, decisions, task => [exactOccurrence(content, task.file.path)], (task, occurrences, decision) => {
-			applied.push(`${task.id}:${decision.action}`)
-			if (decision.action === 'rename') {
-				const currentOccurrences = retargetCachedOccurrences(occurrences, { wiki: newPath, markdown: newPath })
-				const next = replaceBatchAttachmentContent(content, oldPath, newPath, 'short', 'a-much-longer-name', occurrences, currentOccurrences)
-				if (next === content) return false
+		await orchestrateCreateBurst(tasks, {
+			prepareExact: () => ({ context: 'exact', occurrencesByPath: new Map(tasks.map(current => [current.file.path, [exactOccurrence(content, current.file.path)]])) }),
+			choose: () => ({ action: 'cancel', applyToRemaining: false }),
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			refreshOccurrences: (_context, current) => [exactOccurrence(content, current.file.path)],
+			applyExact: (_context, current, occurrences, decision) => {
+				applied.push(`${current.id}:${decision.action}`)
+				if (decision.action === 'rename') {
+					const currentOccurrences = retargetCachedOccurrences(occurrences, { wiki: newPath, markdown: newPath })
+					const next = replaceBatchAttachmentContent(content, oldPath, newPath, 'short', 'a-much-longer-name', occurrences, currentOccurrences)
+					if (next === content) return false
+					content = next
+					return 'success'
+				}
+				const next = replaceBatchFigureContent(content, '<figure>cancel</figure>', current.file.path, occurrences)
+				if (next === null) return false
 				content = next
-				return true
-			}
-			const next = replaceBatchFigureContent(content, '<figure>cancel</figure>', task.file.path, occurrences)
-			if (next === null) return false
-			content = next
-			return true
+				return 'success'
+			},
+			isCurrent: () => true,
+			notify: () => {},
 		})
 
-		expect(result.failed).toEqual([])
 		expect(applied).toEqual(['rename:rename', 'cancel:cancel'])
 		expect(content).toBe(`![[${newPath}]]\n<figure>cancel</figure>`)
 	})
@@ -186,80 +168,161 @@ describe('create burst coordination', () => {
 		const renamePath = 'assets/rename.png'
 		const newPath = 'assets/a-much-longer-name.png'
 		const cancelPath = 'assets/cancel.png'
-		const tasks = [
-			{ id: 'cancel', file: { path: renamePath } },
-			{ id: 'rename', file: { path: cancelPath } },
-		]
-		const decisions = [
-			{ id: 'cancel', action: 'cancel' as const, name: '' },
-			{ id: 'rename', action: 'rename' as const, name: newPath },
-		]
+		const tasks = [task('cancel', renamePath), task('rename', cancelPath, { autoRename: true })]
 		let content = `![[${renamePath}]]\n![[${cancelPath}]]`
 		const applied: string[] = []
-		const result = await coordinateExactBurstDecisions(tasks, decisions, task => [exactOccurrence(content, task.file.path)], (task, occurrences, decision) => {
-			applied.push(`${task.id}:${decision.action}`)
-			if (decision.action === 'cancel') {
-				const next = replaceBatchFigureContent(content, '<figure>cancel</figure>', task.file.path, occurrences)
-				if (next === null) return false
+		await orchestrateCreateBurst(tasks, {
+			prepareExact: () => ({ context: 'exact', occurrencesByPath: new Map(tasks.map(current => [current.file.path, [exactOccurrence(content, current.file.path)]])) }),
+			choose: () => ({ action: 'cancel', applyToRemaining: false }),
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			refreshOccurrences: (_context, current) => [exactOccurrence(content, current.file.path)],
+			applyExact: (_context, current, occurrences, decision) => {
+				applied.push(`${current.id}:${decision.action}`)
+				if (decision.action === 'cancel') {
+					const next = replaceBatchFigureContent(content, '<figure>cancel</figure>', current.file.path, occurrences)
+					if (next === null) return false
+					content = next
+					return 'success'
+				}
+				const currentOccurrences = retargetCachedOccurrences(occurrences, { wiki: newPath, markdown: newPath })
+				const next = replaceBatchAttachmentContent(content, cancelPath, newPath, 'cancel', 'a-much-longer-name', occurrences, currentOccurrences)
+				if (next === content) return false
 				content = next
-				return true
-			}
-			const currentOccurrences = retargetCachedOccurrences(occurrences, { wiki: newPath, markdown: newPath })
-			const next = replaceBatchAttachmentContent(content, cancelPath, newPath, 'cancel', 'a-much-longer-name', occurrences, currentOccurrences)
-			if (next === content) return false
-			content = next
-			return true
+				return 'success'
+			},
+			isCurrent: () => true,
+			notify: () => {},
 		})
 
-		expect(result.failed).toEqual([])
 		expect(applied).toEqual(['cancel:cancel', 'rename:rename'])
 		expect(content).toBe(`<figure>cancel</figure>\n\n![[${newPath}]]`)
 	})
 
-	it('returns a distinct renamed-but-unsynchronized result for one aggregate notice', async () => {
-		const task = { id: 'rename', file: { path: 'assets/rename.png' } }
-		const result = await coordinateExactBurstDecisions(
-			[task],
-			[{ id: task.id, action: 'rename', name: 'renamed' }],
-			currentTask => [occurrence(`![[${currentTask.file.path}]]`, currentTask.file.path)],
-			() => 'renamed-but-unsynchronized',
-		)
+	it('aggregates disjoint exact outcomes across separate decisions into one accurate final notice', async () => {
+		const renamed = task('renamed', 'assets/renamed.png')
+		const skipped = task('skipped', 'assets/skipped.png')
+		const content = '![[assets/renamed.png]]\n![[assets/skipped.png]]'
+		const choices = [
+			{ action: 'rename' as const, name: 'renamed-new.png', applyToRemaining: false },
+			{ action: 'rename' as const, name: '', applyToRemaining: false },
+		]
+		const notices: string[] = []
+		const result = await orchestrateCreateBurst([renamed, skipped], {
+			prepareExact: () => ({ context: 'exact', occurrencesByPath: new Map([
+				[renamed.file.path, [exactOccurrence(content, renamed.file.path)]],
+				[skipped.file.path, [exactOccurrence(content, skipped.file.path)]],
+			]) }),
+			choose: () => choices.shift() as typeof choices[number],
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			refreshOccurrences: (_context, current) => [exactOccurrence(content, current.file.path)],
+			applyExact: (_context, current, _occurrences, _decision, notify) => {
+				expect(notify).toBe(false)
+				return current.id === renamed.id ? 'renamed-but-unsynchronized' : 'not-applied'
+			},
+			isCurrent: () => true,
+			notify: message => { notices.push(message) },
+		})
 
-		expect(result.applied).toEqual([])
-		expect(result.failed).toEqual([task])
-		expect(result.renamedButUnsynchronized).toEqual([task])
-		expect(summarizeExactBurstOutcome(result)).toBe('Renamed 1 attachment, but references could not be synchronized.')
-	})
-
-	it('combines renamed and not-applied outcomes into one exact-burst summary', async () => {
-		const renamed = { id: 'renamed', file: { path: 'assets/renamed.png' } }
-		const skipped = { id: 'skipped', file: { path: 'assets/skipped.png' } }
-		const result = await coordinateExactBurstDecisions(
-			[renamed, skipped],
-			[
-				{ id: renamed.id, action: 'rename', name: 'new-name' },
-				{ id: skipped.id, action: 'cancel', name: '' },
-			],
-			currentTask => [occurrence(`![[${currentTask.file.path}]]`, currentTask.file.path)],
-			currentTask => currentTask.id === renamed.id ? 'renamed-but-unsynchronized' : 'not-applied',
-		)
-
-		expect(summarizeExactBurstOutcome(result)).toBe(
-			'Renamed 1 attachment, but references could not be synchronized; skipped 1 attachment because its exact reference could not be synchronized.',
-		)
+		expect(result).toEqual({ applied: [], notApplied: [skipped], renamedButUnsynchronized: [renamed] })
+		expect(notices).toEqual([
+			'Renamed 1 attachment, but references could not be synchronized; skipped 1 attachment because the requested change could not be applied.',
+		])
 	})
 
 	it('omits empty summaries and pluralizes aggregate exact outcomes', () => {
-		expect(summarizeExactBurstOutcome({ applied: [], failed: [], renamedButUnsynchronized: [] })).toBeNull()
-		expect(summarizeExactBurstOutcome({ applied: [], failed: [{ id: 'skipped' }], renamedButUnsynchronized: [] })).toBe('Skipped 1 attachment because its exact reference could not be synchronized.')
+		expect(summarizeExactBurstOutcome({ applied: [], notApplied: [], renamedButUnsynchronized: [] })).toBeNull()
+		expect(summarizeExactBurstOutcome({ applied: [], notApplied: [{ id: 'skipped' }], renamedButUnsynchronized: [] })).toBe('Skipped 1 attachment because the requested change could not be applied.')
 		expect(summarizeExactBurstOutcome({
 			applied: [],
-			failed: [{ id: 'renamed-a' }, { id: 'renamed-b' }, { id: 'skipped-a' }, { id: 'skipped-b' }],
+			notApplied: [{ id: 'skipped-a' }, { id: 'skipped-b' }],
 			renamedButUnsynchronized: [{ id: 'renamed-a' }, { id: 'renamed-b' }],
-		})).toBe('Renamed 2 attachments, but references could not be synchronized; skipped 2 attachments because its exact reference could not be synchronized.')
+		})).toBe('Renamed 2 attachments, but references could not be synchronized; skipped 2 attachments because the requested changes could not be applied.')
+	})
+
+	it('emits one preparation failure and does not open decisions', async () => {
+		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png')]
+		const notices: string[] = []
+		const result = await orchestrateCreateBurst(tasks, {
+			prepareExact: () => ({ failure: 'Skipped 2 attachments because the active note changed' }),
+			choose: () => { throw new Error('failed preparation must not open decisions') },
+			applyBounded: () => { throw new Error('failed preparation must not apply bounded decisions') },
+			refreshOccurrences: () => { throw new Error('failed preparation must not refresh occurrences') },
+			applyExact: () => { throw new Error('failed preparation must not apply exact decisions') },
+			isCurrent: () => true,
+			notify: message => { notices.push(message) },
+		})
+		expect(result).toEqual({ applied: [], notApplied: tasks, renamedButUnsynchronized: [] })
+		expect(notices).toEqual(['Skipped 2 attachments because the active note changed'])
+	})
+
+	it('classifies an unavailable refreshed occurrence as not applied', async () => {
+		const tasks = [task('missing', 'assets/missing.png'), task('unresolved', 'assets/unresolved.png')]
+		const content = '![[assets/missing.png]]'
+		const notices: string[] = []
+		const result = await orchestrateCreateBurst(tasks, {
+			prepareExact: () => ({ context: 'exact', occurrencesByPath: new Map([
+				[tasks[0].file.path, [exactOccurrence(content, tasks[0].file.path)]],
+			]) }),
+			choose: () => ({ action: 'cancel', applyToRemaining: false }),
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			refreshOccurrences: () => null,
+			applyExact: () => { throw new Error('missing exact occurrences must not be applied') },
+			isCurrent: () => true,
+			notify: message => { notices.push(message) },
+		})
+		expect(result).toEqual({ applied: [], notApplied: [tasks[1], tasks[0]], renamedButUnsynchronized: [] })
+		expect(notices).toEqual(['Skipped 2 attachments because the requested changes could not be applied.'])
+	})
+
+	it('suppresses work and final notices when the generation becomes stale', async () => {
+		const one = task('one', 'assets/one.png')
+		const exact = [task('first', 'assets/first.png'), task('second', 'assets/second.png')]
+		const exactContent = '![[assets/first.png]]\n![[assets/second.png]]'
+		const exactPreparation = {
+			context: 'exact',
+			occurrencesByPath: new Map(exact.map(current => [current.file.path, [exactOccurrence(exactContent, current.file.path)]])),
+		}
+		const fail = () => { throw new Error('stale orchestration must stop') }
+		const notices: string[] = []
+		const stale = () => ({
+			prepareExact: fail,
+			choose: fail,
+			applyBounded: fail,
+			refreshOccurrences: fail,
+			applyExact: fail,
+			isCurrent: () => false,
+			notify: (message: string) => { notices.push(message) },
+		})
+		expect(await orchestrateCreateBurst([one], stale())).toBeNull()
+
+		let checks = 0
+		expect(await orchestrateCreateBurst([one], {
+			...stale(),
+			choose: () => ({ action: 'cancel' as const, applyToRemaining: false }),
+			isCurrent: () => ++checks < 3,
+		})).toBeNull()
+
+		let current = true
+		expect(await orchestrateCreateBurst(exact, {
+			...stale(),
+			prepareExact: () => { current = false; return exactPreparation },
+			isCurrent: () => current,
+		})).toEqual({ applied: [], notApplied: [], renamedButUnsynchronized: [] })
+
+		current = true
+		expect(await orchestrateCreateBurst(exact, {
+			...stale(),
+			prepareExact: () => exactPreparation,
+			choose: () => ({ action: 'cancel' as const, applyToRemaining: true }),
+			refreshOccurrences: (_context, task) => [exactOccurrence(exactContent, task.file.path)],
+			applyExact: (_context, task) => { if (task.id === 'second') current = false; return 'success' as const },
+			isCurrent: () => current,
+		})).toEqual({ applied: exact, notApplied: [], renamedButUnsynchronized: [] })
+		expect(notices).toEqual([])
 	})
 
 	it('summarizes one exact preflight failure with singular grammar', () => {
 		expect(summarizeExactSourcePreparationFailure(1, 'synchronize')).toBe('Skipped 1 attachment because the active note could not be synchronized')
+		expect(summarizeExactSourcePreparationFailure(2, 'rollback')).toBe('Skipped 2 attachments because the active note could not be synchronized')
 	})
 })
