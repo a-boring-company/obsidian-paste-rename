@@ -257,6 +257,26 @@ describe('create burst orchestration', () => {
 		expect(notices).toEqual(['Skipped 2 attachments because the active note changed'])
 	})
 
+	it('suppresses a preparation failure notice when the generation becomes stale', async () => {
+		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png')]
+		const notices: string[] = []
+		let current = true
+		const result = await orchestrateCreateBurst(tasks, {
+			prepareExact: () => {
+				current = false
+				return { failure: 'stale preparation failure' }
+			},
+			choose: () => { throw new Error('failed preparation must not open decisions') },
+			applyBounded: () => { throw new Error('failed preparation must not apply bounded decisions') },
+			applyExact: () => { throw new Error('failed preparation must not apply exact decisions') },
+			isCurrent: () => current,
+			notify: message => { notices.push(message) },
+		})
+
+		expect(result).toEqual({ applied: [], notApplied: tasks, renamedButUnsynchronized: [] })
+		expect(notices).toEqual([])
+	})
+
 	it('classifies an unavailable exact task as not applied', async () => {
 		const tasks = [task('missing', 'assets/missing.png'), task('unresolved', 'assets/unresolved.png')]
 		const content = '![[assets/missing.png]]'

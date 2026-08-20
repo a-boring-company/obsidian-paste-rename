@@ -283,7 +283,7 @@ function createBurstProductionHarness(options: BurstProductionHarnessOptions) {
 function detachBatchEditorAfterThirdRead(app: App): void {
 	const view = (app.workspace.getActiveViewOfType as () => MarkdownView)()
 	const vault = app.vault as unknown as { read: (target: TFile) => Promise<string> }
-	const originalRead = vault.read.bind(vault)
+	const originalRead = vi.mocked(vault.read).getMockImplementation()!
 	let reads = 0
 	vi.spyOn(vault, 'read').mockImplementation(async target => {
 		const value = await originalRead(target)
@@ -306,7 +306,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 			baselineContent: content,
 		})
 		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
-		const originalRead = (app.vault as unknown as { read: (file: TFile) => Promise<string> }).read
+		const originalRead = vi.mocked((app.vault as unknown as { read: (file: TFile) => Promise<string> }).read).getMockImplementation()!
 		let changed = false
 		vi.spyOn(app.vault as unknown as { read: (file: TFile) => Promise<string> }, 'read').mockImplementation(async file => {
 			const value = await originalRead(file)
@@ -365,7 +365,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
 		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
 		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
-		const originalProcess = vault.process.bind(vault)
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
 		let rejectNext = true
 		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
 			const result = await originalProcess(file, transform)
@@ -390,7 +390,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
 		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
 		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
-		const originalProcess = vault.process.bind(vault)
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
 		let firstProcess = true
 		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
 			if (!firstProcess) throw new Error('rollback unavailable')
@@ -416,7 +416,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
 		const view = (app.workspace.getActiveViewOfType as () => MarkdownView)()
 		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
-		const originalProcess = vault.process.bind(vault)
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
 		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
 			const result = await originalProcess(file, transform)
 			if (result.includes('<figure')) view.file = createFile('notes/other.md') as unknown as TFile
@@ -796,7 +796,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		const vault = app.vault as unknown as {
 			process: (file: TFile, transform: (content: string) => string) => Promise<string>
 		}
-		const originalProcess = vault.process.bind(vault)
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
 		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
 			const before = diskContent()
 			const result = await originalProcess(file, transform)
@@ -852,7 +852,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		const rename = vi.spyOn(plugin, 'renameBatchAttachmentOutcome')
 		const figure = vi.spyOn(plugin, 'convertBatchAttachmentToFigure')
 		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
-		const originalProcess = vault.process.bind(vault)
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
 		let rejectNext = true
 		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
 			const result = await originalProcess(file, transform)

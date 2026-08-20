@@ -34,7 +34,7 @@ export async function prepareExactSourceSnapshot<T>(options: ExactSourcePrefligh
 		try {
 			restored = await options.rollbackSnapshot()
 		} catch {
-			restored = false
+			// Keep the default rollback failure result.
 		}
 		return { value: null, failure: restored ? failure : 'rollback' }
 	}

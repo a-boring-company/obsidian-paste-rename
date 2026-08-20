@@ -46,6 +46,7 @@ describe('generated figure document replacement', () => {
 	it('handles literal percent characters in a canonical path safely', () => {
 		const figure = renderFigure({ src: 'assets/%bad.png', stem: '%bad' })
 		expect(extractGeneratedFigurePaths(figure)).toEqual(['assets/%bad.png'])
+		expect(extractGeneratedFigurePaths(`${figure}\n${figure}`)).toEqual(['assets/%bad.png'])
 	})
 
 	it('owns production figures with raw special-character stems', () => {
