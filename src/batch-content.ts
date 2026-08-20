@@ -1,4 +1,5 @@
 import type { CachedMetadata } from 'obsidian'
+import { replaceCachedAttachmentReferences } from './attachment-reference'
 import { CachedEmbedOccurrence, replaceRetargetedCachedOccurrences } from './batch-occurrences'
 import { replaceGeneratedFigures } from './figure-document'
 
@@ -211,6 +212,30 @@ export function liveBatchAttachmentChange(
 		occurrences,
 		currentOccurrences,
 	))
+}
+
+export function liveBatchFigureChange(
+	content: string,
+	replacement: string,
+	replacementPath: string,
+	occurrences: readonly CachedEmbedOccurrence[],
+): DocumentTextChange | null {
+	return fullDocumentChange(content, replaceBatchFigureContent(content, replacement, replacementPath, occurrences))
+}
+
+export function replaceBatchFigureContent(
+	content: string,
+	replacement: string,
+	replacementPath: string,
+	occurrences: readonly CachedEmbedOccurrence[],
+): string {
+	return replaceCachedAttachmentReferences({
+		content,
+		replacement,
+		replacementPath,
+		image: true,
+		asFigure: true,
+	}, occurrences)?.text ?? content
 }
 
 export function replaceBatchAttachmentContent(

@@ -16,11 +16,11 @@ import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
 import { applyBatchChoice, createBatchChoiceState } from './batch-state';
-import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent } from './batch-content';
+import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent, replaceBatchFigureContent } from './batch-content';
 import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
-import { CachedAttachmentGroup, CachedEmbedOccurrence, attachmentTargetDiscovered, cacheEmbedOccurrences, cacheReferenceOccurrences, deriveRetargetDestinations, groupCachedAttachments, retargetCachedOccurrences } from './batch-occurrences';
+import { CachedAttachmentGroup, CachedEmbedOccurrence, attachmentTargetDiscovered, cacheEmbedOccurrences, cacheReferenceOccurrences, deriveRetargetDestinations, groupCachedAttachments, mapCachedOccurrencesByTargetPath, retargetCachedOccurrences } from './batch-occurrences';
 import { AttachmentTypeUserSource, chooseAttachmentTypeConfig } from './attachment-type-files';
 import { applyAttachmentTypeSnapshot, commitAttachmentTypeSnapshot, createAttachmentTypePersistence, reconcileAttachmentTypeFailure } from './attachment-type-state';
 import {
@@ -32,7 +32,7 @@ import {
 	parseAttachmentTypeConfig,
 	parseAttachmentTypeTextarea,
 } from './attachment-types';
-import { cancelBurst, createBurstCancellation, isBurstCancelled } from './burst';
+import { cancelBurst, createBurstCancellation, isBurstCancelled, planCreateBurst } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
 import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
 import { renderFigure } from './figure';
@@ -125,6 +125,13 @@ interface BatchSourceSnapshot {
 	content: string
 	embeds: CachedEmbedOccurrence[]
 	references: CachedEmbedOccurrence[]
+}
+
+type BatchSourcePreparationFailure = 'capture' | 'read' | 'synchronize' | 'cancelled'
+
+interface BatchSourcePreparationResult {
+	snapshot: BatchSourceSnapshot | null
+	failure: BatchSourcePreparationFailure | null
 }
 
 
@@ -262,6 +269,10 @@ export default class PasteRenamePlugin extends Plugin {
 			const generated = this.generateNewName(request.file, request.sourceFile)
 			return { ...request, id: `${index}`, proposedName: generated.newName, stem: generated.stem, isMeaningful: generated.isMeaningful }
 		})
+		if (tasks.length > 1) {
+			await this.processExactRenameBurst(tasks, generation)
+			return
+		}
 		let state = createBatchChoiceState(tasks.map(task => ({ id: task.id, proposedName: task.proposedName })))
 		const taskById = new Map(tasks.map(task => [task.id, task]))
 		while (state.remaining.length) {
@@ -283,6 +294,122 @@ export default class PasteRenamePlugin extends Plugin {
 			await this.applyRenameDecisions(result.decisions, taskById, generation)
 			state = result.state
 		}
+	}
+
+	async processExactRenameBurst(tasks: RenameTask[], generation: number): Promise<void> {
+		const sourcePath = tasks[0]?.sourcePath
+		if (!sourcePath || tasks.some(task => task.sourcePath !== sourcePath || task.sourceFile.path !== sourcePath)) {
+			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because their active note changed`)
+			return
+		}
+		const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath)
+		if (!(sourceFile instanceof TFile)) {
+			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because the active note is unavailable`)
+			return
+		}
+		const editorSession = this.getBatchEditorSession(sourceFile)
+		if (!editorSession) {
+			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because the active note editor is unavailable`)
+			return
+		}
+		const prepared = await this.prepareBatchSourceExact(sourceFile, editorSession, generation)
+		if (!prepared.snapshot || !this.isCurrent(generation)) {
+			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because the active note could not be synchronized`)
+			return
+		}
+		const targetPaths = tasks.map(task => task.file.path)
+		const occurrencesByPath = mapCachedOccurrencesByTargetPath(
+			prepared.snapshot.references,
+			targetPaths,
+			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+		)
+		const plan = planCreateBurst(tasks, occurrencesByPath)
+		if (plan.mode !== 'exact') return
+		if (plan.unresolved.length && this.isCurrent(generation)) {
+			new Notice(`Skipped ${plan.unresolved.length} attachment${plan.unresolved.length === 1 ? '' : 's'} because its cached reference could not be resolved`)
+		}
+		const taskById = new Map(plan.resolved.map(task => [task.id, task]))
+		let state = createBatchChoiceState(plan.resolved.map(task => ({ id: task.id, proposedName: task.proposedName })))
+		while (state.remaining.length) {
+			if (!this.isCurrent(generation)) return
+			const current = taskById.get(state.remaining[0].id)
+			if (!current) break
+			if (current.autoRename && current.isMeaningful) {
+				const result = applyBatchChoice(state, 'rename', { name: current.proposedName })
+				await this.applyExactRenameDecisions(result.decisions, taskById, sourceFile, editorSession, generation)
+				state = result.state
+				continue
+			}
+			const choice = await this.openRenameModal(current, state.remaining.length > 1, generation)
+			if (!this.isCurrent(generation)) return
+			const result = applyBatchChoice(state, choice.action, {
+				name: choice.name,
+				applyToRemaining: choice.applyToRemaining,
+			})
+			await this.applyExactRenameDecisions(result.decisions, taskById, sourceFile, editorSession, generation)
+			state = result.state
+		}
+	}
+
+	async applyExactRenameDecisions(
+		decisions: Array<{ id: string; action: 'rename' | 'cancel'; name: string }>,
+		taskById: Map<string, RenameTask & { occurrences: CachedEmbedOccurrence[] }>,
+		sourceFile: TFile,
+		editorSession: BatchEditorSession<Editor, MarkdownView>,
+		generation: number,
+	): Promise<void> {
+		for (const decision of decisions) {
+			if (!this.isCurrent(generation)) return
+			const task = taskById.get(decision.id)
+			if (!task) continue
+			if (decision.action === 'rename') {
+				await this.renameBatchAttachment(task.file, decision.name, sourceFile, editorSession, generation)
+			} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
+				await this.convertBatchAttachmentToFigure(task, sourceFile, editorSession, generation)
+			}
+		}
+	}
+
+	async convertBatchAttachmentToFigure(
+		task: RenameTask & { occurrences: CachedEmbedOccurrence[] },
+		sourceFile: TFile,
+		editorSession: BatchEditorSession<Editor, MarkdownView>,
+		generation: number,
+	): Promise<boolean> {
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
+		const capturedContent = editorSession.editor.getValue()
+		const replacement = renderFigure({ src: task.file.path, stem: task.file.basename, width: this.settings.imageWidth })
+		const nextContent = replaceBatchFigureContent(capturedContent, replacement, task.file.path, task.occurrences)
+		const change = fullDocumentChange(capturedContent, nextContent)
+		if (!change) return true
+		let writeResult: 'written' | 'conflict' | 'cancelled'
+		try {
+			writeResult = await compareAndWriteVaultText(
+				this.app.vault,
+				sourceFile,
+				content => content === editorSession.baselineContent || content === capturedContent,
+				() => this.isCurrent(generation) && this.isBatchEditorSessionBound(editorSession, sourceFile),
+				nextContent,
+				() => {
+					if (!this.isCurrent(generation)
+						|| !this.isBatchEditorSessionBound(editorSession, sourceFile)
+						|| editorSession.editor.getValue() !== capturedContent) return false
+					editorSession.editor.transaction({ changes: [change] })
+					return true
+				},
+			)
+		} catch (error) {
+			if (this.isCurrent(generation)) {
+				console.error('Could not save synchronized attachment figures', error)
+				new Notice('Could not synchronize the active note before batch rename')
+			}
+			return false
+		}
+		if (writeResult !== 'written') {
+			if (writeResult === 'conflict' && this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
+			return false
+		}
+		return advanceBatchEditorBaseline(editorSession, sourceFile.path, nextContent, editorSession.view.file?.path, editorSession.view.editor)
 	}
 
 	async applyRenameDecisions(
@@ -597,35 +724,43 @@ export default class PasteRenamePlugin extends Plugin {
 		session: BatchEditorSession<Editor, MarkdownView>,
 		generation: number,
 	): Promise<BatchSourceSnapshot | null> {
-		if (!this.isBatchEditorSessionBound(session, sourceFile) || !this.isCurrent(generation)) {
-			if (this.isCurrent(generation)) new Notice('Could not capture the active note editor')
-			return null
-		}
+		const prepared = await this.prepareBatchSourceExact(sourceFile, session, generation)
+		if (prepared.snapshot || !this.isCurrent(generation)) return prepared.snapshot
+		if (prepared.failure === 'capture') new Notice('Could not capture the active note editor')
+		else if (prepared.failure === 'read') new Notice('Could not read the active note before batch rename')
+		else if (prepared.failure === 'synchronize') new Notice('Could not synchronize the active note before batch rename')
+		return null
+	}
+
+	async prepareBatchSourceExact(
+		sourceFile: TFile,
+		session: BatchEditorSession<Editor, MarkdownView>,
+		generation: number,
+	): Promise<BatchSourcePreparationResult> {
+		if (!this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'capture' }
+		if (!this.isCurrent(generation)) return { snapshot: null, failure: 'cancelled' }
 		const snapshot = session.editor.getValue()
 		const baselineContent = session.baselineContent
 		let disk: string
 		try {
 			disk = await this.app.vault.read(sourceFile)
 		} catch (error) {
-			if (this.isCurrent(generation)) {
-				console.error('Could not read active note before batch rename', error)
-				new Notice('Could not read the active note before batch rename')
-			}
-			return null
+			console.error('Could not read active note before batch rename', error)
+			return { snapshot: null, failure: 'read' }
 		}
-		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
 		const snapshotFromCache = (cache: CachedMetadata): BatchSourceSnapshot => {
 			const embeds = cacheEmbedOccurrences(snapshot, cache.embeds ?? [])
 			const references = cacheReferenceOccurrences(snapshot, [...(cache.embeds ?? []), ...(cache.links ?? [])])
 			return { content: snapshot, embeds, references }
 		}
 		try {
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
 			if (snapshot === disk) {
 				const cached = this.metadataLedger.exact(sourceFile.path, snapshot)
 				if (cached) {
-					if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return null
-					return snapshotFromCache(cached)
+					if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return { snapshot: null, failure: 'cancelled' }
+					return { snapshot: snapshotFromCache(cached), failure: null }
 				}
 			} else {
 				const writeResult = await compareAndWriteVaultText(
@@ -635,14 +770,11 @@ export default class PasteRenamePlugin extends Plugin {
 					() => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
 					snapshot,
 				)
-				if (writeResult !== 'written') {
-					if (this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
-					return null
-				}
-				if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return null
-				if (!this.isCurrent(generation)) return null
+				if (writeResult !== 'written') return { snapshot: null, failure: writeResult === 'cancelled' ? 'cancelled' : 'synchronize' }
+				if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return { snapshot: null, failure: 'cancelled' }
+				if (!this.isCurrent(generation)) return { snapshot: null, failure: 'cancelled' }
 			}
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
 			const synced = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
 				if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
 				const cache = this.metadataLedger.exact(sourceFile.path, snapshot)
@@ -660,19 +792,13 @@ export default class PasteRenamePlugin extends Plugin {
 				if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
 				return null
 			}, () => !this.isCurrent(generation))
-			if (!synced) {
-				if (this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
-				return null
-			}
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+			if (!synced) return { snapshot: null, failure: this.isCurrent(generation) ? 'synchronize' : 'cancelled' }
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
 			advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)
-			return snapshotFromCache(synced)
+			return { snapshot: snapshotFromCache(synced), failure: null }
 		} catch (error) {
-			if (this.isCurrent(generation)) {
-				console.error('Could not synchronize active note before batch rename', error)
-				new Notice('Could not synchronize the active note before batch rename')
-			}
-			return null
+			console.error('Could not synchronize active note before batch rename', error)
+			return { snapshot: null, failure: 'synchronize' }
 		}
 	}
 

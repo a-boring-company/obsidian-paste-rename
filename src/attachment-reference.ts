@@ -1,7 +1,8 @@
 import { extractGeneratedDestination } from './attachment-links'
 import { LineReplacement } from './embed-location'
-import { findReferenceOccurrences, pathsEqual, ReferencePath } from './embeds'
+import { extractReferencePath, findReferenceOccurrences, pathsEqual, ReferencePath } from './embeds'
 import { advanceMarkdownDocumentContext, emptyMarkdownDocumentContext, MarkdownDocumentContext } from './markdown-context'
+import type { CachedEmbedOccurrence } from './batch-occurrences'
 
 interface AttachmentReferenceInput {
 	content: string
@@ -153,6 +154,74 @@ function replaceCandidate(content: string, candidate: ReferenceCandidate, replac
 		start: candidate.start,
 		end: candidate.end,
 		replacementText,
+	}
+}
+
+type CachedAttachmentReferenceInput = Pick<AttachmentReferenceInput, 'content' | 'replacement'>
+	& Partial<Pick<AttachmentReferenceInput, 'replacementPath' | 'image' | 'asFigure' | 'initialContext'>>
+
+type CachedReferenceCandidate = ReferenceCandidate & { reference: ReferencePath }
+
+function cachedCandidate(content: string, occurrence: CachedEmbedOccurrence): CachedReferenceCandidate | null {
+	if (occurrence.start < 0 || occurrence.end < occurrence.start || content.slice(occurrence.start, occurrence.end) !== occurrence.original) return null
+	const parsed = extractReferencePath(occurrence.original)
+	if (!parsed || parsed.start !== 0 || parsed.end !== occurrence.original.length) return null
+	if (occurrence.destinationStart !== occurrence.start + parsed.destinationStart
+		|| occurrence.destinationEnd !== occurrence.start + parsed.destinationEnd) return null
+	const reference: ReferencePath = {
+		...parsed,
+		start: occurrence.start,
+		end: occurrence.end,
+		destinationStart: occurrence.start + parsed.destinationStart,
+		destinationEnd: occurrence.start + parsed.destinationEnd,
+	}
+	return {
+		start: occurrence.start,
+		end: occurrence.end,
+		old: true,
+		current: false,
+		reference,
+	}
+}
+
+function exactRangesOverlap(start: number, end: number, otherStart: number, otherEnd: number): boolean {
+	return start < otherEnd && otherStart < end
+}
+
+export function replaceCachedAttachmentReferences(
+	input: CachedAttachmentReferenceInput,
+	occurrences: readonly CachedEmbedOccurrence[],
+): LineReplacement | null {
+	if (!occurrences.length) return null
+	const candidates: CachedReferenceCandidate[] = []
+	for (const occurrence of occurrences) {
+		const candidate = cachedCandidate(input.content, occurrence)
+		if (!candidate) return null
+		if (!input.image || candidate.reference?.image) candidates.push(candidate)
+	}
+	if (!candidates.length) return null
+	const replacements = candidates.map(candidate => {
+		const reference = candidate.reference
+		if (input.asFigure && reference.image && canRenderTopLevelFigure(input.content, candidate, input.initialContext ?? null)) {
+			const figure = replaceCandidate(input.content, candidate, input.replacement)
+			return { start: candidate.start, end: candidate.end, text: figure.replacementText as string }
+		}
+		const replacementPath = input.replacementPath ?? extractGeneratedDestination(input.replacement) ?? input.replacement
+		return { start: reference.destinationStart, end: reference.destinationEnd, text: replacementPath }
+	}).sort((left, right) => left.start - right.start)
+	for (let index = 1; index < replacements.length; index++) {
+		if (exactRangesOverlap(replacements[index - 1].start, replacements[index - 1].end, replacements[index].start, replacements[index].end)) return null
+	}
+	let text = input.content
+	for (const replacement of replacements.reverse()) text = `${text.slice(0, replacement.start)}${replacement.text}${text.slice(replacement.end)}`
+	if (text === input.content) return { text, start: 0, end: input.content.length, matched: true }
+	const firstReplacement = replacements[replacements.length - 1]
+	const lastReplacement = replacements[0]
+	return {
+		text,
+		start: firstReplacement.start,
+		end: lastReplacement.end,
+		replacementText: text,
 	}
 }
 
