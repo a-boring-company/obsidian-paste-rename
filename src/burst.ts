@@ -15,17 +15,12 @@ export interface CreateBurstDecision {
 	name: string
 }
 
+export type ExactBurstMutationStatus = 'success' | 'not-applied' | 'renamed-but-unsynchronized'
+
 export interface ExactBurstMutationResult<T> {
 	applied: T[]
 	failed: T[]
-}
-
-export interface CreateBurstCoordinationResult<T> {
-	mode: 'bounded' | 'exact'
-	resolved: Array<T & { occurrences: CachedEmbedOccurrence[] }>
-	unresolved: T[]
-	applied: Array<T & { occurrences: CachedEmbedOccurrence[] }>
-	failed: Array<T & { occurrences: CachedEmbedOccurrence[] }>
+	renamedButUnsynchronized: T[]
 }
 
 type MaybePromise<T> = T | Promise<T>
@@ -34,11 +29,12 @@ export async function coordinateExactBurstDecisions<T extends { id: string }>(
 	tasks: readonly T[],
 	decisions: readonly CreateBurstDecision[],
 	refreshOccurrences: (task: T) => MaybePromise<readonly CachedEmbedOccurrence[] | null>,
-	applyMutation: (task: T, occurrences: readonly CachedEmbedOccurrence[], decision: CreateBurstDecision) => MaybePromise<boolean | void>,
+	applyMutation: (task: T, occurrences: readonly CachedEmbedOccurrence[], decision: CreateBurstDecision) => MaybePromise<boolean | void | ExactBurstMutationStatus>,
 ): Promise<ExactBurstMutationResult<T>> {
 	const taskById = new Map(tasks.map(task => [task.id, task]))
 	const applied: T[] = []
 	const failed: T[] = []
+	const renamedButUnsynchronized: T[] = []
 	for (const decision of decisions) {
 		const task = taskById.get(decision.id)
 		if (!task) continue
@@ -48,23 +44,30 @@ export async function coordinateExactBurstDecisions<T extends { id: string }>(
 			continue
 		}
 		const mutationResult = await applyMutation(task, occurrences, decision)
-		if (mutationResult === false) failed.push(task)
-		else applied.push(task)
+		if (mutationResult === false || mutationResult === 'not-applied') failed.push(task)
+		else if (mutationResult === 'renamed-but-unsynchronized') {
+			failed.push(task)
+			renamedButUnsynchronized.push(task)
+		} else applied.push(task)
 	}
-	return { applied, failed }
+	return { applied, failed, renamedButUnsynchronized }
 }
 
-export async function coordinateCreateBurst<T extends { id: string; file: { path: string } }>(
-	tasks: readonly T[],
-	occurrencesByPath: ReadonlyMap<string, readonly CachedEmbedOccurrence[]>,
-	decisions: readonly CreateBurstDecision[],
-	refreshOccurrences: (task: T) => MaybePromise<readonly CachedEmbedOccurrence[] | null>,
-	applyMutation: (task: T, occurrences: readonly CachedEmbedOccurrence[], decision: CreateBurstDecision) => MaybePromise<boolean | void>,
-): Promise<CreateBurstCoordinationResult<T>> {
-	const plan = planCreateBurst(tasks, occurrencesByPath)
-	if (plan.mode === 'bounded') return { mode: 'bounded', resolved: [], unresolved: [], applied: [], failed: [] }
-	const result = await coordinateExactBurstDecisions<T & { occurrences: CachedEmbedOccurrence[] }>(plan.resolved, decisions, refreshOccurrences, applyMutation)
-	return { mode: 'exact', resolved: plan.resolved, unresolved: plan.unresolved, ...result }
+export function summarizeExactBurstOutcome<T>(result: ExactBurstMutationResult<T>): string | null {
+	const renamedCount = result.renamedButUnsynchronized.length
+	const skippedCount = result.failed.length - renamedCount
+	const notices: string[] = []
+	if (renamedCount > 0) {
+		notices.push(`Renamed ${renamedCount} attachment${renamedCount === 1 ? '' : 's'}, but references could not be synchronized`)
+	}
+	if (skippedCount > 0) {
+		notices.push(`${notices.length > 0 ? 'skipped' : 'Skipped'} ${skippedCount} attachment${skippedCount === 1 ? '' : 's'} because its exact reference could not be synchronized`)
+	}
+	return notices.length > 0 ? `${notices.join('; ')}.` : null
+}
+
+export function summarizeExactSourcePreparationFailure(taskCount: number, _failure: string): string {
+	return `Skipped ${taskCount} attachment${taskCount === 1 ? '' : 's'} because the active note could not be synchronized`
 }
 
 export function planCreateBurst<T extends { file: { path: string } }>(

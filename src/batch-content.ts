@@ -2,6 +2,68 @@ import type { CachedMetadata, TFile, Vault } from 'obsidian'
 import { replaceCachedAttachmentReferences } from './attachment-reference'
 import { CachedEmbedOccurrence, replaceRetargetedCachedOccurrences } from './batch-occurrences'
 import { replaceGeneratedFigures } from './figure-document'
+import { retryBounded } from './retry'
+
+export type ExactSourcePreflightFailure = 'synchronize' | 'rollback' | 'cancelled'
+
+export interface ExactSourcePreflightResult<T> {
+	value: T | null
+	failure: ExactSourcePreflightFailure | null
+}
+
+interface ExactSourcePreflightOptions<T> {
+	snapshot: string
+	disk: string
+	isCurrent: () => boolean
+	writeSnapshot: () => Promise<'written' | 'conflict' | 'cancelled'>
+	readExactCache: () => T | null | Promise<T | null>
+	readDisk: () => Promise<string>
+	rollbackSnapshot: () => Promise<boolean>
+	advanceBaseline: () => boolean
+	retries?: number
+	wait?: () => Promise<void>
+}
+
+export async function prepareExactSourceSnapshot<T>(options: ExactSourcePreflightOptions<T>): Promise<ExactSourcePreflightResult<T>> {
+	let wroteSnapshot = false
+	const fail = async (failure: ExactSourcePreflightFailure): Promise<ExactSourcePreflightResult<T>> => {
+		if (!wroteSnapshot) return { value: null, failure }
+		let restored = false
+		try {
+			restored = await options.rollbackSnapshot()
+		} catch {
+			restored = false
+		}
+		return { value: null, failure: restored ? failure : 'rollback' }
+	}
+
+	try {
+		if (!options.isCurrent()) return fail('cancelled')
+		if (options.snapshot !== options.disk) {
+			const writeResult = await options.writeSnapshot()
+			if (writeResult !== 'written') return fail(writeResult === 'cancelled' ? 'cancelled' : 'synchronize')
+			wroteSnapshot = true
+			if (!options.isCurrent()) return fail('cancelled')
+		}
+		const attempts = Math.max(1, options.retries ?? 1)
+		const cached = await retryBounded(attempts, async attempt => {
+			if (!options.isCurrent()) return null
+			try {
+				const cache = await options.readExactCache()
+				if (cache !== null && await options.readDisk() === options.snapshot) return cache
+			} catch {
+				// Keep polling until the exact cache and disk content agree.
+			}
+			if (attempt + 1 < attempts && options.wait) await options.wait()
+			return null
+		}, () => !options.isCurrent())
+		if (cached === null) return fail(options.isCurrent() ? 'synchronize' : 'cancelled')
+		if (!options.isCurrent() || !options.advanceBaseline()) return fail('cancelled')
+		return { value: cached, failure: null }
+	} catch {
+		return fail('synchronize')
+	}
+}
 
 interface BatchMetadataLedgerEntry {
 	fingerprint: string

@@ -16,7 +16,7 @@ import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
 import { applyBatchChoice, createBatchChoiceState } from './batch-state';
-import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from './batch-content';
+import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, liveBatchAttachmentChange, prepareExactSourceSnapshot, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from './batch-content';
 import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
@@ -32,7 +32,7 @@ import {
 	parseAttachmentTypeConfig,
 	parseAttachmentTypeTextarea,
 } from './attachment-types';
-import { cancelBurst, coordinateCreateBurst, coordinateExactBurstDecisions, createBurstCancellation, isBurstCancelled } from './burst';
+import { cancelBurst, coordinateExactBurstDecisions, createBurstCancellation, ExactBurstMutationStatus, isBurstCancelled, planCreateBurst, summarizeExactBurstOutcome, summarizeExactSourcePreparationFailure } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
 import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
 import { renderFigure } from './figure';
@@ -314,7 +314,7 @@ export default class PasteRenamePlugin extends Plugin {
 		}
 		const prepared = await this.prepareBatchSourceExact(sourceFile, editorSession, generation)
 		if (!prepared.snapshot || !this.isCurrent(generation)) {
-			if (this.isCurrent(generation)) new Notice(`Skipped ${tasks.length} attachments because the active note could not be synchronized`)
+			if (this.isCurrent(generation)) new Notice(summarizeExactSourcePreparationFailure(tasks.length, prepared.failure ?? 'synchronize'))
 			return
 		}
 		const targetPaths = tasks.map(task => task.file.path)
@@ -323,7 +323,7 @@ export default class PasteRenamePlugin extends Plugin {
 			targetPaths,
 			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
 		)
-		const plan = await coordinateCreateBurst(tasks, occurrencesByPath, [], () => null, () => false)
+		const plan = planCreateBurst(tasks, occurrencesByPath)
 		if (plan.mode !== 'exact') return
 		if (plan.unresolved.length && this.isCurrent(generation)) {
 			new Notice(`Skipped ${plan.unresolved.length} attachment${plan.unresolved.length === 1 ? '' : 's'} because its cached reference could not be resolved`)
@@ -372,13 +372,14 @@ export default class PasteRenamePlugin extends Plugin {
 				).get(task.file.path) ?? null
 			},
 			async (task, occurrences, decision) => {
-				if (decision.action === 'rename') return this.renameBatchAttachment(task.file, decision.name, sourceFile, editorSession, generation)
+				if (decision.action === 'rename') return this.renameBatchAttachmentOutcome(task.file, decision.name, sourceFile, editorSession, generation, false)
 				if (this.settings.imageOutput !== 'html' || !isImageExtension(task.file.extension, this.attachmentTypes)) return true
 				return this.convertBatchAttachmentToFigure({ ...task, occurrences }, sourceFile, editorSession, generation)
 			},
 		)
-		if (result.failed.length && this.isCurrent(generation)) {
-			new Notice(`Skipped ${result.failed.length} attachment${result.failed.length === 1 ? '' : 's'} because its exact reference could not be synchronized`)
+		const notice = summarizeExactBurstOutcome(result)
+		if (notice && this.isCurrent(generation)) {
+			new Notice(notice)
 		}
 	}
 
@@ -453,13 +454,14 @@ export default class PasteRenamePlugin extends Plugin {
 		replaceCurrentLine = false,
 		capturedCursor?: EditorPosition,
 		generation = this.cancellation.generation,
+		notify = true,
 	): Promise<RenameFileResult> {
 		const originPath = file.path
 		const suffix = file.extension ? `.${file.extension}` : ''
 		const rawStem = suffix && inputNewName.endsWith(suffix) ? inputNewName.slice(0, -suffix.length) : inputNewName
 		const normalizedStem = normalizeFilenameStem(rawStem)
 		if (!normalizedStem) {
-			if (this.isCurrent(generation)) new Notice('Failed to rename attachment: new name is empty')
+			if (notify && this.isCurrent(generation)) new Notice('Failed to rename attachment: new name is empty')
 			return { success: false, edit: null }
 		}
 		const normalizedName = suffix ? `${normalizedStem}${suffix}` : normalizedStem
@@ -477,7 +479,7 @@ export default class PasteRenamePlugin extends Plugin {
 				if (!this.isCurrent(generation)) return { success: false, edit: null }
 				await this.app.fileManager.renameFile(file, newPath)
 			} catch (err) {
-				if (this.isCurrent(generation)) new Notice(`Failed to rename ${newName}: ${err}`)
+				if (notify && this.isCurrent(generation)) new Notice(`Failed to rename ${newName}: ${err}`)
 				return { success: false, edit: null }
 			}
 		}
@@ -734,12 +736,13 @@ export default class PasteRenamePlugin extends Plugin {
 		sourceFile: TFile,
 		session: BatchEditorSession<Editor, MarkdownView>,
 		generation: number,
+		notify = true,
 	): Promise<BatchSourceSnapshot | null> {
 		const prepared = await this.prepareBatchSourceExact(sourceFile, session, generation)
 		if (prepared.snapshot || !this.isCurrent(generation)) return prepared.snapshot
-		if (prepared.failure === 'capture') new Notice('Could not capture the active note editor')
-		else if (prepared.failure === 'read') new Notice('Could not read the active note before batch rename')
-		else if (prepared.failure === 'synchronize' || prepared.failure === 'rollback') new Notice('Could not synchronize the active note before batch rename')
+		if (notify && prepared.failure === 'capture') new Notice('Could not capture the active note editor')
+		else if (notify && prepared.failure === 'read') new Notice('Could not read the active note before batch rename')
+		else if (notify && (prepared.failure === 'synchronize' || prepared.failure === 'rollback')) new Notice('Could not synchronize the active note before batch rename')
 		return null
 	}
 
@@ -765,58 +768,29 @@ export default class PasteRenamePlugin extends Plugin {
 			const references = cacheReferenceOccurrences(snapshot, [...(cache.embeds ?? []), ...(cache.links ?? [])])
 			return { content: snapshot, embeds, references }
 		}
-		let wroteSnapshot = false
-		const failedAfterWrite = async (failure: BatchSourcePreparationFailure): Promise<BatchSourcePreparationResult> => {
-			if (!wroteSnapshot) return { snapshot: null, failure }
-			const restored = await rollbackBatchSourceWrite(this.app.vault, sourceFile, snapshot, disk)
-			return { snapshot: null, failure: restored ? failure : 'rollback' }
+		const prepared = await prepareExactSourceSnapshot({
+			snapshot,
+			disk,
+			isCurrent: () => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
+			writeSnapshot: () => compareAndWriteVaultText(
+				this.app.vault,
+				sourceFile,
+				content => content === baselineContent || content === snapshot,
+				() => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
+				snapshot,
+			),
+			readExactCache: () => this.metadataLedger.exact(sourceFile.path, snapshot),
+			readDisk: () => this.app.vault.read(sourceFile),
+			rollbackSnapshot: () => rollbackBatchSourceWrite(this.app.vault, sourceFile, snapshot, disk),
+			advanceBaseline: () => advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor),
+			retries: FIGURE_RETRY_COUNT,
+			wait: () => new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS)),
+		})
+		if (!prepared.value) {
+			if (prepared.failure === 'synchronize') console.error('Could not synchronize active note before batch rename')
+			return { snapshot: null, failure: prepared.failure }
 		}
-		try {
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
-			if (snapshot === disk) {
-				const cached = this.metadataLedger.exact(sourceFile.path, snapshot)
-				if (cached) {
-					if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return { snapshot: null, failure: 'cancelled' }
-					return { snapshot: snapshotFromCache(cached), failure: null }
-				}
-			} else {
-				const writeResult = await compareAndWriteVaultText(
-					this.app.vault,
-					sourceFile,
-					content => content === baselineContent || content === snapshot,
-					() => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
-					snapshot,
-				)
-				if (writeResult !== 'written') return { snapshot: null, failure: writeResult === 'cancelled' ? 'cancelled' : 'synchronize' }
-				wroteSnapshot = true
-				if (!this.isCurrent(generation)) return await failedAfterWrite('cancelled')
-			}
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return await failedAfterWrite('cancelled')
-			const synced = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
-				if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
-				const cache = this.metadataLedger.exact(sourceFile.path, snapshot)
-				if (cache) {
-					try {
-						if (await this.app.vault.read(sourceFile) !== snapshot) {
-							if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
-							return null
-						}
-					} catch {
-						return null
-					}
-					return cache
-				}
-				if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
-				return null
-			}, () => !this.isCurrent(generation))
-			if (!synced) return await failedAfterWrite(this.isCurrent(generation) ? 'synchronize' : 'cancelled')
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return await failedAfterWrite('cancelled')
-			if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return await failedAfterWrite('cancelled')
-			return { snapshot: snapshotFromCache(synced), failure: null }
-		} catch (error) {
-			console.error('Could not synchronize active note before batch rename', error)
-			return await failedAfterWrite('synchronize')
-		}
+		return { snapshot: snapshotFromCache(prepared.value), failure: null }
 	}
 
 	async scanBatchAttachments(
@@ -839,15 +813,16 @@ export default class PasteRenamePlugin extends Plugin {
 		return [...grouped.values()]
 	}
 
-	async renameBatchAttachment(
+	async renameBatchAttachmentOutcome(
 		file: TFile,
 		newName: string,
 		sourceFile: TFile,
 		editorSession: BatchEditorSession<Editor, MarkdownView>,
 		generation = this.cancellation.generation,
-	): Promise<boolean> {
-		const prepared = await this.prepareBatchSource(sourceFile, editorSession, generation)
-		if (!prepared || !this.isCurrent(generation)) return false
+		notify = true,
+	): Promise<ExactBurstMutationStatus> {
+		const prepared = await this.prepareBatchSource(sourceFile, editorSession, generation, notify)
+		if (!prepared || !this.isCurrent(generation)) return 'not-applied'
 		const freshGroups = groupCachedAttachments<TFile>(
 			prepared.content,
 			prepared.embeds,
@@ -863,18 +838,18 @@ export default class PasteRenamePlugin extends Plugin {
 			file.path,
 			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
 		)) {
-			if (this.isCurrent(generation)) new Notice(`Could not revalidate ${file.name} in the active note`)
-			return false
+			if (notify && this.isCurrent(generation)) new Notice(`Could not revalidate ${file.name} in the active note`)
+			return 'not-applied'
 		}
 		const oldOccurrences = prepared.references.filter(occurrence =>
 			this.app.metadataCache.getFirstLinkpathDest(occurrence.link, sourceFile.path)?.path === file.path)
 		const oldPath = file.path
 		const oldStem = file.basename
-		const renameResult = await this.renameFile(file, newName, sourceFile.path, false, undefined, generation)
-		if (!renameResult.success) return false
-		if (!this.isCurrent(generation)) return false
-		if (file.path === oldPath) return true
-		if (!this.isCurrent(generation)) return false
+		const renameResult = await this.renameFile(file, newName, sourceFile.path, false, undefined, generation, notify)
+		if (!renameResult.success) return file.path === oldPath ? 'not-applied' : 'renamed-but-unsynchronized'
+		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
+		if (file.path === oldPath) return 'success'
+		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
 		const oldRelativePath = relativeAttachmentPath(sourceFile.path, oldPath)
 		const newRelativePath = relativeAttachmentPath(sourceFile.path, file.path)
 		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourceFile.path)
@@ -885,13 +860,13 @@ export default class PasteRenamePlugin extends Plugin {
 		const currentOccurrences = retargetCachedOccurrences(oldOccurrences, deriveRetargetDestinations(wikiDestination, newLinkText, markdownFallback))
 		const expectedNativeContent = expectedBatchNativeContent(prepared.content, oldOccurrences, currentOccurrences)
 		const readiness = await this.waitForBatchEditorContent(editorSession, sourceFile, prepared.content, expectedNativeContent, oldOccurrences.length > 0, generation)
-		if (!this.isCurrent(generation)) return false
+		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
 		if (readiness === null) {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
+			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return 'renamed-but-unsynchronized'
 		}
 		if ('detached' in readiness) {
-			if (!this.isCurrent(generation)) return false
+			if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
 			let contentRejected = false
 			let processResult: 'written' | 'cancelled'
 			try {
@@ -913,22 +888,22 @@ export default class PasteRenamePlugin extends Plugin {
 			} catch (error) {
 				if (this.isCurrent(generation)) {
 					console.error('Could not save synchronized attachment references', error)
-					new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+					if (notify) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
 				}
-				return false
+				return 'renamed-but-unsynchronized'
 			}
-			if (processResult === 'cancelled') return false
+			if (processResult === 'cancelled') return 'renamed-but-unsynchronized'
 			if (contentRejected) {
-				if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-				return false
+				if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+				return 'renamed-but-unsynchronized'
 			}
-			return this.isCurrent(generation)
+			return this.isCurrent(generation) ? 'success' : 'renamed-but-unsynchronized'
 		}
-		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return 'renamed-but-unsynchronized'
 		const capturedContent = editorSession.editor.getValue()
 		if (capturedContent !== prepared.content && capturedContent !== expectedNativeContent) {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
+			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return 'renamed-but-unsynchronized'
 		}
 		const capturedNextContent = replaceBatchAttachmentContent(
 			capturedContent,
@@ -970,26 +945,38 @@ export default class PasteRenamePlugin extends Plugin {
 		} catch (error) {
 			if (this.isCurrent(generation)) {
 				console.error('Could not save synchronized attachment references', error)
-				new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+				if (notify) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
 			}
-			return false
+			return 'renamed-but-unsynchronized'
 		}
-		if (writeResult === 'cancelled') return false
+		if (writeResult === 'cancelled') return 'renamed-but-unsynchronized'
 		if (writeResult === 'conflict') {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
+			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return 'renamed-but-unsynchronized'
 		}
-		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
+		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return 'renamed-but-unsynchronized'
 		const latestContent = editorSession.editor.getValue()
 		const commitState = batchCommitEditorState(capturedContent, capturedNextContent, latestContent)
 		if (commitState === 'drifted') {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
+			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
+			return 'renamed-but-unsynchronized'
 		}
 		if (commitState === 'captured') {
 			if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
 		}
 		return advanceBatchEditorBaseline(editorSession, sourceFile.path, capturedNextContent, editorSession.view.file?.path, editorSession.view.editor)
+			? 'success'
+			: 'renamed-but-unsynchronized'
+	}
+
+	async renameBatchAttachment(
+		file: TFile,
+		newName: string,
+		sourceFile: TFile,
+		editorSession: BatchEditorSession<Editor, MarkdownView>,
+		generation = this.cancellation.generation,
+	): Promise<boolean> {
+		return (await this.renameBatchAttachmentOutcome(file, newName, sourceFile, editorSession, generation, true)) === 'success'
 	}
 
 	async waitForBatchEditorContent(
