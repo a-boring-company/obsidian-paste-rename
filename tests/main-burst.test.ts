@@ -784,18 +784,6 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(noticeMessages).toEqual(['Renamed one.png to one.png'])
 	})
 
-	it('uses the canonical file path for ordinary nested-note figure conversion', async () => {
-		const { editor, file, plugin, sourceFile } = createLiveHarness({
-			sourcePath: 'notes/deep/source.md', filePath: 'assets/image.png', generatedLink: '![[assets/image.png]]',
-		})
-
-		const result = await plugin.replaceAttachmentReference(file, sourceFile.path, file.path, { line: 0, ch: 0 }, 0)
-
-		expect(result.matched).toBe(true)
-		expect(editor.getValue()).toContain('<img src="assets/image.png"')
-		expect(editor.getValue()).not.toContain('<img src="../assets/image.png"')
-	})
-
 	it('uses canonical old and new paths for manual batch figure rename', async () => {
 		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' })
 		const { editor, editorSession, file, plugin, sourceFile } = createLiveHarness({

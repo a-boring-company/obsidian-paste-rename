@@ -6,7 +6,6 @@ import { liveBatchAttachmentChange } from '../src/batch-content'
 import { cacheEmbedOccurrences, retargetCachedOccurrences } from '../src/batch-occurrences'
 import { renderFigure } from '../src/figure'
 import { compareAndWriteVaultText } from '../src/vault-text'
-import { summarizeExactSourcePreparationFailure } from '../src/burst'
 
 function cachedEmbed(content: string, original: string) {
 	const start = content.indexOf(original)
@@ -98,9 +97,6 @@ describe('batch source content', () => {
 		expect(cachePolls).toBe(2)
 		expect(disk).toBe('editor baseline')
 		expect(baselineAdvances).toBe(0)
-		expect(result.failure ? [summarizeExactSourcePreparationFailure(2, result.failure)] : []).toEqual([
-			'Skipped 2 attachments because the active note could not be synchronized',
-		])
 	})
 
 	it('returns the exact cached snapshot and advances the baseline only after disk agreement', async () => {

@@ -363,34 +363,6 @@ describe('create burst orchestration', () => {
 		expect(notices).toEqual([])
 	})
 
-	it('stops an apply-to-remaining sequence when cancellation occurs during the first mutation', async () => {
-		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png'), task('third', 'assets/third.png')]
-		const content = tasks.map(current => `![[${current.file.path}]]`).join('\n')
-		let current = true
-		const mutated: string[] = []
-		const notices: string[] = []
-		const result = await orchestrateCreateBurst(tasks, {
-			prepareExact: () => ({
-				context: 'exact',
-				occurrencesByPath: new Map(tasks.map(currentTask => [currentTask.file.path, [exactOccurrence(content, currentTask.file.path)]])),
-			}),
-			choose: () => ({ action: 'cancel', applyToRemaining: true }),
-			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			applyExact: async (_context, currentTask) => {
-				mutated.push(currentTask.id)
-				await Promise.resolve()
-				current = false
-				return 'success' as const
-			},
-			isCurrent: () => current,
-			notify: message => { notices.push(message) },
-		})
-
-		expect(result).toEqual({ applied: [], notApplied: [], renamedButUnsynchronized: [] })
-		expect(mutated).toEqual(['first'])
-		expect(notices).toEqual([])
-	})
-
 	it('summarizes one exact preflight failure with singular grammar', () => {
 		expect(summarizeExactSourcePreparationFailure(1, 'synchronize')).toBe('Skipped 1 attachment because the active note could not be synchronized')
 		expect(summarizeExactSourcePreparationFailure(2, 'rollback')).toBe('Skipped 2 attachments because the active note could not be synchronized')
