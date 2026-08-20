@@ -16,7 +16,7 @@ import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
 import { applyBatchChoice, createBatchChoiceState } from './batch-state';
-import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent, replaceBatchFigureContent } from './batch-content';
+import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from './batch-content';
 import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
@@ -32,7 +32,7 @@ import {
 	parseAttachmentTypeConfig,
 	parseAttachmentTypeTextarea,
 } from './attachment-types';
-import { cancelBurst, createBurstCancellation, isBurstCancelled, planCreateBurst } from './burst';
+import { cancelBurst, coordinateCreateBurst, coordinateExactBurstDecisions, createBurstCancellation, isBurstCancelled } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
 import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
 import { renderFigure } from './figure';
@@ -127,7 +127,7 @@ interface BatchSourceSnapshot {
 	references: CachedEmbedOccurrence[]
 }
 
-type BatchSourcePreparationFailure = 'capture' | 'read' | 'synchronize' | 'cancelled'
+type BatchSourcePreparationFailure = 'capture' | 'read' | 'synchronize' | 'rollback' | 'cancelled'
 
 interface BatchSourcePreparationResult {
 	snapshot: BatchSourceSnapshot | null
@@ -323,7 +323,7 @@ export default class PasteRenamePlugin extends Plugin {
 			targetPaths,
 			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
 		)
-		const plan = planCreateBurst(tasks, occurrencesByPath)
+		const plan = await coordinateCreateBurst(tasks, occurrencesByPath, [], () => null, () => false)
 		if (plan.mode !== 'exact') return
 		if (plan.unresolved.length && this.isCurrent(generation)) {
 			new Notice(`Skipped ${plan.unresolved.length} attachment${plan.unresolved.length === 1 ? '' : 's'} because its cached reference could not be resolved`)
@@ -358,20 +358,32 @@ export default class PasteRenamePlugin extends Plugin {
 		editorSession: BatchEditorSession<Editor, MarkdownView>,
 		generation: number,
 	): Promise<void> {
-		for (const decision of decisions) {
-			if (!this.isCurrent(generation)) return
-			const task = taskById.get(decision.id)
-			if (!task) continue
-			if (decision.action === 'rename') {
-				await this.renameBatchAttachment(task.file, decision.name, sourceFile, editorSession, generation)
-			} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
-				await this.convertBatchAttachmentToFigure(task, sourceFile, editorSession, generation)
-			}
+		const tasks = [...taskById.values()]
+		const result = await coordinateExactBurstDecisions(
+			tasks,
+			decisions,
+			async task => {
+				const prepared = await this.prepareBatchSourceExact(sourceFile, editorSession, generation)
+				if (!prepared.snapshot || !this.isCurrent(generation)) return null
+				return mapCachedOccurrencesByTargetPath(
+					prepared.snapshot.references,
+					[task.file.path],
+					link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+				).get(task.file.path) ?? null
+			},
+			async (task, occurrences, decision) => {
+				if (decision.action === 'rename') return this.renameBatchAttachment(task.file, decision.name, sourceFile, editorSession, generation)
+				if (this.settings.imageOutput !== 'html' || !isImageExtension(task.file.extension, this.attachmentTypes)) return true
+				return this.convertBatchAttachmentToFigure({ ...task, occurrences }, sourceFile, editorSession, generation)
+			},
+		)
+		if (result.failed.length && this.isCurrent(generation)) {
+			new Notice(`Skipped ${result.failed.length} attachment${result.failed.length === 1 ? '' : 's'} because its exact reference could not be synchronized`)
 		}
 	}
 
 	async convertBatchAttachmentToFigure(
-		task: RenameTask & { occurrences: CachedEmbedOccurrence[] },
+		task: RenameTask & { occurrences: readonly CachedEmbedOccurrence[] },
 		sourceFile: TFile,
 		editorSession: BatchEditorSession<Editor, MarkdownView>,
 		generation: number,
@@ -380,6 +392,7 @@ export default class PasteRenamePlugin extends Plugin {
 		const capturedContent = editorSession.editor.getValue()
 		const replacement = renderFigure({ src: task.file.path, stem: task.file.basename, width: this.settings.imageWidth })
 		const nextContent = replaceBatchFigureContent(capturedContent, replacement, task.file.path, task.occurrences)
+		if (nextContent === null) return false
 		const change = fullDocumentChange(capturedContent, nextContent)
 		if (!change) return true
 		let writeResult: 'written' | 'conflict' | 'cancelled'
@@ -401,12 +414,10 @@ export default class PasteRenamePlugin extends Plugin {
 		} catch (error) {
 			if (this.isCurrent(generation)) {
 				console.error('Could not save synchronized attachment figures', error)
-				new Notice('Could not synchronize the active note before batch rename')
 			}
 			return false
 		}
 		if (writeResult !== 'written') {
-			if (writeResult === 'conflict' && this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
 			return false
 		}
 		return advanceBatchEditorBaseline(editorSession, sourceFile.path, nextContent, editorSession.view.file?.path, editorSession.view.editor)
@@ -728,7 +739,7 @@ export default class PasteRenamePlugin extends Plugin {
 		if (prepared.snapshot || !this.isCurrent(generation)) return prepared.snapshot
 		if (prepared.failure === 'capture') new Notice('Could not capture the active note editor')
 		else if (prepared.failure === 'read') new Notice('Could not read the active note before batch rename')
-		else if (prepared.failure === 'synchronize') new Notice('Could not synchronize the active note before batch rename')
+		else if (prepared.failure === 'synchronize' || prepared.failure === 'rollback') new Notice('Could not synchronize the active note before batch rename')
 		return null
 	}
 
@@ -754,6 +765,12 @@ export default class PasteRenamePlugin extends Plugin {
 			const references = cacheReferenceOccurrences(snapshot, [...(cache.embeds ?? []), ...(cache.links ?? [])])
 			return { content: snapshot, embeds, references }
 		}
+		let wroteSnapshot = false
+		const failedAfterWrite = async (failure: BatchSourcePreparationFailure): Promise<BatchSourcePreparationResult> => {
+			if (!wroteSnapshot) return { snapshot: null, failure }
+			const restored = await rollbackBatchSourceWrite(this.app.vault, sourceFile, snapshot, disk)
+			return { snapshot: null, failure: restored ? failure : 'rollback' }
+		}
 		try {
 			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
 			if (snapshot === disk) {
@@ -771,10 +788,10 @@ export default class PasteRenamePlugin extends Plugin {
 					snapshot,
 				)
 				if (writeResult !== 'written') return { snapshot: null, failure: writeResult === 'cancelled' ? 'cancelled' : 'synchronize' }
-				if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return { snapshot: null, failure: 'cancelled' }
-				if (!this.isCurrent(generation)) return { snapshot: null, failure: 'cancelled' }
+				wroteSnapshot = true
+				if (!this.isCurrent(generation)) return await failedAfterWrite('cancelled')
 			}
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return await failedAfterWrite('cancelled')
 			const synced = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
 				if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
 				const cache = this.metadataLedger.exact(sourceFile.path, snapshot)
@@ -792,13 +809,13 @@ export default class PasteRenamePlugin extends Plugin {
 				if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
 				return null
 			}, () => !this.isCurrent(generation))
-			if (!synced) return { snapshot: null, failure: this.isCurrent(generation) ? 'synchronize' : 'cancelled' }
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'cancelled' }
-			advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)
+			if (!synced) return await failedAfterWrite(this.isCurrent(generation) ? 'synchronize' : 'cancelled')
+			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return await failedAfterWrite('cancelled')
+			if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return await failedAfterWrite('cancelled')
 			return { snapshot: snapshotFromCache(synced), failure: null }
 		} catch (error) {
 			console.error('Could not synchronize active note before batch rename', error)
-			return { snapshot: null, failure: 'synchronize' }
+			return await failedAfterWrite('synchronize')
 		}
 	}
 

@@ -1,4 +1,4 @@
-import type { CachedMetadata } from 'obsidian'
+import type { CachedMetadata, TFile, Vault } from 'obsidian'
 import { replaceCachedAttachmentReferences } from './attachment-reference'
 import { CachedEmbedOccurrence, replaceRetargetedCachedOccurrences } from './batch-occurrences'
 import { replaceGeneratedFigures } from './figure-document'
@@ -194,6 +194,26 @@ export function fullDocumentChange(current: string, next: string): DocumentTextC
 	}
 }
 
+export async function rollbackBatchSourceWrite(
+	vault: Pick<Vault, 'process' | 'read'>,
+	file: TFile,
+	writtenContent: string,
+	originalContent: string,
+): Promise<boolean> {
+	let restored = false
+	try {
+		await vault.process(file, content => {
+			if (content !== writtenContent) return content
+			restored = true
+			return originalContent
+		})
+		if (!restored) return false
+		return await vault.read(file) === originalContent
+	} catch {
+		return false
+	}
+}
+
 export function liveBatchAttachmentChange(
 	content: string,
 	oldFigurePath: string,
@@ -220,7 +240,8 @@ export function liveBatchFigureChange(
 	replacementPath: string,
 	occurrences: readonly CachedEmbedOccurrence[],
 ): DocumentTextChange | null {
-	return fullDocumentChange(content, replaceBatchFigureContent(content, replacement, replacementPath, occurrences))
+	const nextContent = replaceBatchFigureContent(content, replacement, replacementPath, occurrences)
+	return nextContent === null ? null : fullDocumentChange(content, nextContent)
 }
 
 export function replaceBatchFigureContent(
@@ -228,14 +249,14 @@ export function replaceBatchFigureContent(
 	replacement: string,
 	replacementPath: string,
 	occurrences: readonly CachedEmbedOccurrence[],
-): string {
+): string | null {
 	return replaceCachedAttachmentReferences({
 		content,
 		replacement,
 		replacementPath,
 		image: true,
 		asFigure: true,
-	}, occurrences)?.text ?? content
+	}, occurrences)?.text ?? null
 }
 
 export function replaceBatchAttachmentContent(

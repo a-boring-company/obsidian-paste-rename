@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
-import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership, liveBatchFigureChange } from '../src/batch-content'
+import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership, liveBatchFigureChange, replaceBatchFigureContent, rollbackBatchSourceWrite } from '../src/batch-content'
 import { liveBatchAttachmentChange } from '../src/batch-content'
 import { cacheEmbedOccurrences, retargetCachedOccurrences } from '../src/batch-occurrences'
 import { renderFigure } from '../src/figure'
@@ -76,6 +76,39 @@ describe('batch source content', () => {
 
 	it('does not create a figure change when exact provenance is unavailable', () => {
 		expect(liveBatchFigureChange('unchanged', '<figure>new</figure>', 'assets/new.png', [])).toBeNull()
+		expect(replaceBatchFigureContent('![[assets/old.png]]', '<figure>new</figure>', 'assets/new.png', [{
+			link: 'assets/old.png', original: '![[assets/old.png]]', start: 1, end: 20, destinationStart: 4, destinationEnd: 19,
+		}])).toBeNull()
+	})
+
+	it('rolls back an interim exact-source write after cache preparation fails', async () => {
+		let disk = 'editor baseline'
+		let cacheAvailable = false
+		const file = {} as import('obsidian').TFile
+		const vault = {
+			process: async (_file: unknown, transform: (content: string) => string) => { disk = transform(disk); return disk },
+			read: async (_file: unknown) => disk,
+		}
+		expect(await compareAndWriteVaultText(vault, file, content => content === 'editor baseline', () => true, 'editor snapshot')).toBe('written')
+		expect(cacheAvailable).toBe(false)
+		expect(await rollbackBatchSourceWrite(vault, file, 'editor snapshot', 'editor baseline')).toBe(true)
+		cacheAvailable = true
+		expect(disk).toBe('editor baseline')
+		expect(cacheAvailable).toBe(true)
+	})
+
+	it('reports rollback failure when the guarded source write cannot be restored', async () => {
+	const file = {} as import('obsidian').TFile
+		const unchangedVault = {
+			process: async (_file: unknown, transform: (content: string) => string) => transform('unchanged'),
+			read: async (_file: unknown) => 'different',
+		}
+		expect(await rollbackBatchSourceWrite(unchangedVault, file, 'snapshot', 'baseline')).toBe(false)
+		const throwingVault = {
+			process: async (_file: unknown, _transform: (content: string) => string): Promise<string> => { throw new Error('write failed') },
+			read: async (_file: unknown) => 'snapshot',
+		}
+		expect(await rollbackBatchSourceWrite(throwingVault, file, 'snapshot', 'baseline')).toBe(false)
 	})
 
 	it('recomputes against the latest editor text before applying the transaction', () => {
