@@ -297,26 +297,6 @@ export async function rollbackBatchSourceWrite(
 	}
 }
 
-export function liveBatchAttachmentChange(
-	content: string,
-	oldFigurePath: string,
-	newFigurePath: string,
-	oldStem: string,
-	newStem: string,
-	occurrences: readonly CachedEmbedOccurrence[] = [],
-	currentOccurrences: readonly CachedEmbedOccurrence[] = [],
-): DocumentTextChange | null {
-	return fullDocumentChange(content, replaceBatchAttachmentContent(
-		content,
-		oldFigurePath,
-		newFigurePath,
-		oldStem,
-		newStem,
-		occurrences,
-		currentOccurrences,
-	))
-}
-
 export function replaceBatchFigureContent(
 	content: string,
 	replacement: string,
@@ -340,7 +320,11 @@ export function replaceBatchAttachmentContent(
 	newStem: string,
 	occurrences: readonly CachedEmbedOccurrence[] = [],
 	currentOccurrences: readonly CachedEmbedOccurrence[] = [],
-): string {
+	figureReplacement?: string,
+): string | null {
 	const withUpdatedReferences = replaceRetargetedCachedOccurrences(content, occurrences, currentOccurrences)
-	return replaceGeneratedFigures(withUpdatedReferences, oldFigurePath, newFigurePath, oldStem, newStem)
+	const converted = figureReplacement
+		? replaceBatchFigureContent(withUpdatedReferences, figureReplacement, newFigurePath, currentOccurrences)
+		: withUpdatedReferences
+	return converted === null ? null : replaceGeneratedFigures(converted, oldFigurePath, newFigurePath, oldStem, newStem)
 }

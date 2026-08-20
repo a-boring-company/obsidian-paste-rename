@@ -280,6 +280,19 @@ function createBurstProductionHarness(options: BurstProductionHarnessOptions) {
 	}
 }
 
+function detachBatchEditorAfterThirdRead(app: App): void {
+	const view = (app.workspace.getActiveViewOfType as () => MarkdownView)()
+	const vault = app.vault as unknown as { read: (target: TFile) => Promise<string> }
+	const originalRead = vault.read.bind(vault)
+	let reads = 0
+	vi.spyOn(vault, 'read').mockImplementation(async target => {
+		const value = await originalRead(target)
+		reads += 1
+		if (reads === 3) view.file = createFile('notes/other.md') as unknown as TFile
+		return value
+	})
+}
+
 beforeEach(() => { noticeMessages.length = 0 })
 afterEach(() => { vi.restoreAllMocks() })
 
@@ -578,6 +591,136 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(exactPreflights).toHaveBeenCalledTimes(files.length + 1)
 	})
 
+	it('converts every exact renamed image into a canonical figure in HTML output', async () => {
+		const paths = ['assets/first.png', 'assets/second.png', 'assets/third.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'html' })
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: `${file.basename}-default.${file.extension}`,
+			isMeaningful: false,
+		}))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({
+			action: 'rename', name: 'first-confirmed.png', applyToRemaining: true,
+		})
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		const expectedPaths = ['assets/first-confirmed.png', 'assets/second-default.png', 'assets/third-default.png']
+		const expectedContent = expectedPaths.map(path => renderFigure({
+			src: path,
+			stem: path.slice(path.lastIndexOf('/') + 1, path.lastIndexOf('.')),
+			width: plugin.settings.imageWidth,
+		})).join('\n\n')
+		expect(editor.getValue()).toBe(expectedContent)
+		expect(diskContent()).toBe(expectedContent)
+	})
+
+	it.each([
+		['live', 'length increase', false, 'assets/old.png', 'very-long-renamed-image.png'],
+		['live', 'length decrease', false, 'assets/old-long-image-name.png', 'new.png'],
+		['detached', 'length increase', true, 'assets/old.png', 'very-long-renamed-image.png'],
+		['detached', 'length decrease', true, 'assets/old-long-image-name.png', 'new.png'],
+	] as const)('converts repeated mixed references in a %s exact rename with a %s', async (_path, _length, detached, oldPath, newName) => {
+		const content = `![[${oldPath}]]\n- ![[${oldPath}|Caption]]\n![[${oldPath}]]`
+		const { app, diskContent, editor, editorSession, files: [file], plugin, sourceFile } = createBurstProductionHarness({ filePaths: [oldPath], content, imageOutput: 'html' })
+		if (detached) detachBatchEditorAfterThirdRead(app)
+
+		const outcome = await plugin.renameBatchAttachmentOutcome(file, newName, sourceFile, editorSession, 0, false, true)
+
+		const newPath = `assets/${newName}`
+		const figure = renderFigure({ src: newPath, stem: newName.slice(0, -'.png'.length), width: plugin.settings.imageWidth })
+		const expectedContent = `${figure}\n\n- ![[${newPath}|Caption]]\n${figure}`
+		expect(outcome).toBe('success')
+		expect(editor.getValue()).toBe(detached ? content : expectedContent)
+		expect(diskContent()).toBe(expectedContent)
+	})
+
+	it.each([
+		['live', false],
+		['detached', true],
+	] as const)('converts a same-name exact image to a figure in the %s editor path', async (_label, detached) => {
+		const filePath = 'assets/same-name.png'
+		const content = `![[${filePath}]]`
+		const { app, diskContent, editor, editorSession, files: [file], plugin, sourceFile } = createBurstProductionHarness({ filePaths: [filePath], content, imageOutput: 'html' })
+		const exactPreflights = vi.spyOn(plugin, 'prepareBatchSourceExact')
+		if (detached) detachBatchEditorAfterThirdRead(app)
+
+		const outcome = await plugin.renameBatchAttachmentOutcome(file, file.name, sourceFile, editorSession, 0, false, true)
+
+		const expectedContent = renderFigure({ src: filePath, stem: file.basename, width: plugin.settings.imageWidth })
+		expect(outcome).toBe('success')
+		expect(exactPreflights).toHaveBeenCalledOnce()
+		expect(editor.getValue()).toBe(detached ? content : expectedContent)
+		expect(diskContent()).toBe(expectedContent)
+	})
+
+	it('reports a same-name live commit rejection before its transform as not applied', async () => {
+		const filePath = 'assets/same-name.png'
+		const content = `![[${filePath}]]`
+		const { app, diskContent, editor, editorSession, files: [file], plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: [filePath], content, imageOutput: 'html',
+		})
+		vi.spyOn(app.vault as unknown as { process: () => Promise<string> }, 'process').mockRejectedValue(new Error('rejected before transform'))
+
+		const outcome = await plugin.renameBatchAttachmentOutcome(file, file.name, sourceFile, editorSession, 0, false, true)
+
+		expect(outcome).toBe('not-applied')
+		expect(editor.getValue()).toBe(content)
+		expect(diskContent()).toBe(content)
+	})
+
+	it('rebases repeated exact occurrences while preserving container links in the live editor', async () => {
+		const paths = ['assets/a.png', 'assets/b.png']
+		const content = `![[${paths[0]}]]\n- ![[${paths[0]}]]\n![[${paths[1]}]]`
+		const { diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'html' })
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: `${file.basename}-default.${file.extension}`,
+			isMeaningful: false,
+		}))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({
+			action: 'rename', name: 'a-much-longer-confirmed.png', applyToRemaining: true,
+		})
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		const firstPath = 'assets/a-much-longer-confirmed.png'
+		const secondPath = 'assets/b-default.png'
+		const expectedContent = [
+			renderFigure({ src: firstPath, stem: 'a-much-longer-confirmed', width: plugin.settings.imageWidth }),
+			'',
+			`- ![[${firstPath}]]`,
+			renderFigure({ src: secondPath, stem: 'b-default', width: plugin.settings.imageWidth }),
+		].join('\n')
+		expect(editor.getValue()).toBe(expectedContent)
+		expect(diskContent()).toBe(expectedContent)
+	})
+
+	it('reports stale exact figure provenance as renamed but unsynchronized', async () => {
+		const oldPath = 'assets/old.png'
+		const content = `![[${oldPath}]]`
+		const { diskContent, editor, editorSession, file, plugin, sourceFile } = createLiveHarness({
+			sourcePath: 'notes/source.md', filePath: oldPath, generatedLink: '![[assets/new.png]]', content, imageOutput: 'html',
+		})
+		const exact = cachedMetadataFor(content).snapshot
+		const stale = exact.references.map(occurrence => ({
+			...occurrence,
+			start: occurrence.start + 1,
+			end: occurrence.end + 1,
+			destinationStart: occurrence.destinationStart + 1,
+			destinationEnd: occurrence.destinationEnd + 1,
+		}))
+		vi.spyOn(plugin, 'prepareBatchSource').mockResolvedValue({ ...exact, embeds: stale, references: stale })
+		vi.spyOn(plugin, 'waitForBatchEditorContent').mockResolvedValue({ ready: true })
+
+		const outcome = await plugin.renameBatchAttachmentOutcome(file, 'new.png', sourceFile, editorSession, 0, false, true)
+
+		expect(outcome).toBe('renamed-but-unsynchronized')
+		expect(editor.getValue()).toBe(content)
+		expect(diskContent()).toBe(content)
+	})
+
 	it('converts an encoded cached reference to a canonical figure in an actual burst', async () => {
 		const rawPath = 'assets/raw%20 folder/Đọc image%.png'
 		const encodedPath = rawPath.split('/').map(segment => encodeURIComponent(segment)).join('/')
@@ -755,7 +898,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 
 		expect(outcome.mock.calls.map(call => call[5])).toEqual([false, false])
 		expect(noticeMessages).toEqual([
-			'Renamed 1 attachment, but references could not be synchronized.',
+			'Renamed 1 attachment, but references could not be synchronized; skipped 1 attachment because the requested change could not be applied.',
 		])
 	})
 

@@ -15,7 +15,7 @@ import {
 import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
-import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, liveBatchAttachmentChange, prepareExactSourceSnapshot, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from './batch-content';
+import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, prepareExactSourceSnapshot, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from './batch-content';
 import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
@@ -829,8 +829,25 @@ export default class PasteRenamePlugin extends Plugin {
 		const renameResult = await this.renameFile(file, newName, sourceFile.path, false, undefined, generation, notify)
 		if (!renameResult.success) return file.path === oldPath ? 'not-applied' : 'renamed-but-unsynchronized'
 		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
-		if (file.path === oldPath) return 'success'
-		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
+		const figureReplacement = exactReferences
+			&& this.settings.imageOutput === 'html'
+			&& isImageExtension(file.extension, this.attachmentTypes)
+			? renderFigure({ src: file.path, stem: file.basename, width: this.settings.imageWidth })
+			: undefined
+		if (file.path === oldPath && !figureReplacement) return 'success'
+		const renamed = file.path !== oldPath
+		const synchronizationFailure = (mayHaveApplied = false): ExactBurstMutationStatus => {
+			const status = renamed ? 'renamed-but-unsynchronized' : mayHaveApplied ? 'partially-applied' : 'not-applied'
+			if (notify && this.isCurrent(generation)) {
+				const message = status === 'renamed-but-unsynchronized'
+					? `Renamed ${file.name}, but references could not be synchronized`
+					: status === 'partially-applied'
+						? `Changed ${file.name}, but references could not be synchronized`
+						: `Could not apply the requested change to ${file.name}`
+				new Notice(message)
+			}
+			return status
+		}
 		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourceFile.path)
 		const wikiDestination = this.app.metadataCache.fileToLinktext(file, sourceFile.path, false)
 		const markdownFallback = wikiDestination === file.name || wikiDestination === file.basename
@@ -839,14 +856,11 @@ export default class PasteRenamePlugin extends Plugin {
 		const currentOccurrences = retargetCachedOccurrences(oldOccurrences, deriveRetargetDestinations(wikiDestination, newLinkText, markdownFallback))
 		const expectedNativeContent = expectedBatchNativeContent(prepared.content, oldOccurrences, currentOccurrences)
 		const readiness = await this.waitForBatchEditorContent(editorSession, sourceFile, prepared.content, expectedNativeContent, oldOccurrences.length > 0, generation)
-		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
-		if (readiness === null) {
-			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return 'renamed-but-unsynchronized'
-		}
+		if (!this.isCurrent(generation)) return synchronizationFailure()
+		if (readiness === null) return synchronizationFailure()
 		if ('detached' in readiness) {
-			if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
 			let contentRejected = false
+			let contentChanged = false
 			let processResult: 'written' | 'cancelled'
 			try {
 				processResult = await processVaultText(this.app.vault, sourceFile, content => {
@@ -854,7 +868,7 @@ export default class PasteRenamePlugin extends Plugin {
 						contentRejected = true
 						return content
 					}
-					return replaceBatchAttachmentContent(
+					const nextContent = replaceBatchAttachmentContent(
 						content,
 						oldPath,
 						file.path,
@@ -862,28 +876,27 @@ export default class PasteRenamePlugin extends Plugin {
 						file.basename,
 						oldOccurrences,
 						currentOccurrences,
+						figureReplacement,
 					)
+					if (nextContent === null) {
+						contentRejected = true
+						return content
+					}
+					contentChanged = nextContent !== content
+					return nextContent
 				}, () => this.isCurrent(generation))
 			} catch (error) {
 				if (this.isCurrent(generation)) {
 					console.error('Could not save synchronized attachment references', error)
-					if (notify) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
 				}
-				return 'renamed-but-unsynchronized'
+				return synchronizationFailure(contentChanged)
 			}
-			if (processResult === 'cancelled') return 'renamed-but-unsynchronized'
-			if (contentRejected) {
-				if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-				return 'renamed-but-unsynchronized'
-			}
-			return this.isCurrent(generation) ? 'success' : 'renamed-but-unsynchronized'
+			if (processResult === 'cancelled' || contentRejected) return synchronizationFailure()
+			return this.isCurrent(generation) ? 'success' : synchronizationFailure(contentChanged)
 		}
-		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return 'renamed-but-unsynchronized'
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return synchronizationFailure()
 		const capturedContent = editorSession.editor.getValue()
-		if (capturedContent !== prepared.content && capturedContent !== expectedNativeContent) {
-			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return 'renamed-but-unsynchronized'
-		}
+		if (capturedContent !== prepared.content && capturedContent !== expectedNativeContent) return synchronizationFailure()
 		const capturedNextContent = replaceBatchAttachmentContent(
 			capturedContent,
 			oldPath,
@@ -892,17 +905,13 @@ export default class PasteRenamePlugin extends Plugin {
 			file.basename,
 			oldOccurrences,
 			currentOccurrences,
+			figureReplacement,
 		)
-		const capturedChange = liveBatchAttachmentChange(
-			capturedContent,
-			oldPath,
-			file.path,
-			oldStem,
-			file.basename,
-			oldOccurrences,
-			currentOccurrences,
-		)
+		if (capturedNextContent === null) return synchronizationFailure()
+		const contentChanged = capturedNextContent !== capturedContent
+		const capturedChange = fullDocumentChange(capturedContent, capturedNextContent)
 		let writeResult: 'written' | 'conflict' | 'cancelled'
+		let liveMutationStarted = false
 		try {
 			writeResult = await compareAndWriteVaultText(
 				this.app.vault,
@@ -917,6 +926,7 @@ export default class PasteRenamePlugin extends Plugin {
 					if (!this.isCurrent(generation)
 						|| !this.isBatchEditorSessionBound(editorSession, sourceFile)
 						|| editorSession.editor.getValue() !== capturedContent) return false
+					liveMutationStarted = contentChanged
 					if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
 					return true
 				},
@@ -924,28 +934,20 @@ export default class PasteRenamePlugin extends Plugin {
 		} catch (error) {
 			if (this.isCurrent(generation)) {
 				console.error('Could not save synchronized attachment references', error)
-				if (notify) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
 			}
-			return 'renamed-but-unsynchronized'
+			return synchronizationFailure(liveMutationStarted)
 		}
-		if (writeResult === 'cancelled') return 'renamed-but-unsynchronized'
-		if (writeResult === 'conflict') {
-			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return 'renamed-but-unsynchronized'
-		}
-		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return 'renamed-but-unsynchronized'
+		if (writeResult === 'cancelled' || writeResult === 'conflict') return synchronizationFailure()
+		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return synchronizationFailure(contentChanged)
 		const latestContent = editorSession.editor.getValue()
 		const commitState = batchCommitEditorState(capturedContent, capturedNextContent, latestContent)
-		if (commitState === 'drifted') {
-			if (notify && this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return 'renamed-but-unsynchronized'
-		}
+		if (commitState === 'drifted') return synchronizationFailure(contentChanged)
 		if (commitState === 'captured') {
 			if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
 		}
 		return advanceBatchEditorBaseline(editorSession, sourceFile.path, capturedNextContent, editorSession.view.file?.path, editorSession.view.editor)
 			? 'success'
-			: 'renamed-but-unsynchronized'
+			: synchronizationFailure(contentChanged)
 	}
 
 	async renameBatchAttachment(

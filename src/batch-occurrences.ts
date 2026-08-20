@@ -147,21 +147,39 @@ export function retargetCachedOccurrences(
 	occurrences: readonly CachedEmbedOccurrence[],
 	destinations: RetargetDestinations,
 ): CachedEmbedOccurrence[] {
-	return occurrences.map(occurrence => {
+	const retargeted = occurrences.map((occurrence, sourceIndex) => {
 		const parsed = extractReferencePath(occurrence.original)
-		if (!parsed) return occurrence
+		if (!parsed) return { sourceIndex, delta: 0, occurrence }
 		const destinationBase = parsed.kind === 'markdown' ? destinations.markdown : destinations.wiki
 		const destination = `${destinationBase}${splitSubpath(parsed.path)}`
 		const currentOriginal = `${occurrence.original.slice(0, parsed.destinationStart)}${destination}${occurrence.original.slice(parsed.destinationEnd)}`
 		return {
-			...occurrence,
-			link: destination,
-			original: currentOriginal,
-			end: occurrence.start + currentOriginal.length,
-			destinationStart: occurrence.start + parsed.destinationStart,
-			destinationEnd: occurrence.start + parsed.destinationStart + destination.length,
+			sourceIndex,
+			delta: currentOriginal.length - occurrence.original.length,
+			occurrence: {
+				...occurrence,
+				link: destination,
+				original: currentOriginal,
+				end: occurrence.start + currentOriginal.length,
+				destinationStart: occurrence.start + parsed.destinationStart,
+				destinationEnd: occurrence.start + parsed.destinationStart + destination.length,
+			},
 		}
 	})
+	const result = Array<CachedEmbedOccurrence>(retargeted.length)
+	let priorDelta = 0
+	for (const item of [...retargeted].sort((left, right) => left.occurrence.start - right.occurrence.start)) {
+		const occurrence = item.occurrence
+		result[item.sourceIndex] = {
+			...occurrence,
+			start: occurrence.start + priorDelta,
+			end: occurrence.end + priorDelta,
+			destinationStart: occurrence.destinationStart + priorDelta,
+			destinationEnd: occurrence.destinationEnd + priorDelta,
+		}
+		priorDelta += item.delta
+	}
+	return result
 }
 
 export function replaceRetargetedCachedOccurrences(

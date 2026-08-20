@@ -240,4 +240,22 @@ describe('cached embedded attachment occurrences', () => {
 		expect(replaceRetargetedCachedOccurrences(deletedLive, oldOccurrences, current)).toBe(deletedLive)
 	})
 
+	it('rebases later duplicate occurrences when retargeted destinations change length', () => {
+		const content = '![[old.png]]\n- ![[old.png]]'
+		const oldOccurrences = cacheEmbedOccurrences(content, [
+			embed('old.png', '![[old.png]]', 0),
+			embed('old.png', '![[old.png]]', content.lastIndexOf('!')),
+		])
+		const longer = retargetCachedOccurrences(oldOccurrences, {
+			wiki: 'assets/a-much-longer-name.png',
+			markdown: 'assets/a-much-longer-name.png',
+		})
+		const longerContent = replaceRetargetedCachedOccurrences(content, oldOccurrences, longer)
+		expect(longerContent.slice(longer[1].start, longer[1].end)).toBe(longer[1].original)
+
+		const shorter = retargetCachedOccurrences(longer, { wiki: 'a.png', markdown: 'a.png' })
+		const shorterContent = replaceRetargetedCachedOccurrences(longerContent, longer, shorter)
+		expect(shorterContent.slice(shorter[1].start, shorter[1].end)).toBe(shorter[1].original)
+	})
+
 })

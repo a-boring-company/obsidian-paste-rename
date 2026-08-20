@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
-import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership, prepareExactSourceSnapshot, replaceBatchFigureContent, rollbackBatchSourceWrite } from '../src/batch-content'
-import { liveBatchAttachmentChange } from '../src/batch-content'
+import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership, prepareExactSourceSnapshot, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from '../src/batch-content'
 import { cacheEmbedOccurrences, retargetCachedOccurrences } from '../src/batch-occurrences'
 import { renderFigure } from '../src/figure'
 import { compareAndWriteVaultText } from '../src/vault-text'
@@ -47,10 +46,9 @@ describe('batch source content', () => {
 		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' })
 		const newFigure = renderFigure({ src: 'assets/new.png', stem: 'new' })
 		const current = `![[assets/new.pdf|Report]]\n${oldFigure}`
-		const change = liveBatchAttachmentChange(current, 'assets/old.png', 'assets/new.png', 'old', 'new')
+		const next = replaceBatchAttachmentContent(current, 'assets/old.png', 'assets/new.png', 'old', 'new')
 
-		expect(change).not.toBeNull()
-		expect(change?.text).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
+		expect(next).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
 	})
 
 	it('rejects figure conversion when exact provenance is unavailable', () => {
@@ -401,22 +399,40 @@ describe('batch source content', () => {
 		expect(await rollbackBatchSourceWrite(throwingVault, file, 'snapshot', 'baseline')).toBe(false)
 	})
 
-	it('recomputes against the latest editor text before applying the transaction', () => {
-		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' })
-		const newFigure = renderFigure({ src: 'assets/new.png', stem: 'new' })
-		const latestEditor = `ordinary text changed during rename\n${oldFigure}`
-		const change = liveBatchAttachmentChange(latestEditor, 'assets/old.png', 'assets/new.png', 'old', 'new')
-		expect(change?.text).toBe(`ordinary text changed during rename\n${newFigure}`)
-	})
-
 	it('updates old embedded destinations together with generated figures', () => {
 		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' })
 		const newFigure = renderFigure({ src: 'assets/new.png', stem: 'new' })
 		const current = `![[assets/old.pdf|Report]]\n${oldFigure}`
 		const oldOccurrences = cachedEmbed(current, '![[assets/old.pdf|Report]]')
-		const change = liveBatchAttachmentChange(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
+		const next = replaceBatchAttachmentContent(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
 
-		expect(change?.text).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
+		expect(next).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
+	})
+
+	it('rejects a live figure change when exact occurrence provenance is stale', () => {
+		const current = '![[assets/old.png]]'
+		const oldOccurrences = cachedEmbed(current, current)
+		const currentOccurrences = retargetCachedOccurrences(oldOccurrences, {
+			wiki: 'assets/new-long-name.png',
+			markdown: 'assets/new-long-name.png',
+		}).map(occurrence => ({
+			...occurrence,
+			start: occurrence.start + 1,
+			end: occurrence.end + 1,
+			destinationStart: occurrence.destinationStart + 1,
+			destinationEnd: occurrence.destinationEnd + 1,
+		}))
+
+		expect(replaceBatchAttachmentContent(
+			current,
+			'assets/old.png',
+			'assets/new-long-name.png',
+			'old',
+			'new-long-name',
+			oldOccurrences,
+			currentOccurrences,
+			renderFigure({ src: 'assets/new-long-name.png', stem: 'new-long-name' }),
+		)).toBeNull()
 	})
 
 	it('accepts only the captured baseline or exact native-link variant', () => {
@@ -469,18 +485,18 @@ describe('batch source content', () => {
 	it('preserves Markdown image labels and titles while updating the destination', () => {
 		const current = '![Report](assets/old.pdf "Title")'
 		const oldOccurrences = cachedEmbed(current, current)
-		const change = liveBatchAttachmentChange(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
+		const next = replaceBatchAttachmentContent(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
 
-		expect(change?.text).toBe('![Report](assets/new.pdf "Title")')
+		expect(next).toBe('![Report](assets/new.pdf "Title")')
 	})
 
 	it('uses an actual generated shortest link for wiki destinations', () => {
-		const change = liveBatchAttachmentChange(
+		const next = replaceBatchAttachmentContent(
 			'![[old.png|Report]]', 'assets/old.png', 'assets/new.png', 'old', 'new',
 			cachedEmbed('![[old.png|Report]]', '![[old.png|Report]]'),
 			retargetCachedOccurrences(cachedEmbed('![[old.png|Report]]', '![[old.png|Report]]'), { wiki: 'new.png', markdown: 'new.png' }),
 		)
-		expect(change?.text).toBe('![[new.png|Report]]')
+		expect(next).toBe('![[new.png|Report]]')
 	})
 
 	it('keeps the captured source editor bound when focus switches files', () => {
