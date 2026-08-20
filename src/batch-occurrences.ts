@@ -16,6 +16,23 @@ export interface CachedAttachmentGroup<T extends { path: string }> {
 	file: T
 }
 
+export function mapCachedOccurrencesByTargetPath<T extends { path: string }>(
+	occurrences: readonly CachedEmbedOccurrence[],
+	targetPaths: readonly string[],
+	resolve: (link: string) => T | null,
+): Map<string, CachedEmbedOccurrence[]> {
+	const targets = new Set(targetPaths)
+	const mapped = new Map<string, CachedEmbedOccurrence[]>()
+	for (const occurrence of occurrences) {
+		const file = resolve(occurrence.link)
+		if (!file || !targets.has(file.path)) continue
+		const targetOccurrences = mapped.get(file.path)
+		if (targetOccurrences) targetOccurrences.push(occurrence)
+		else mapped.set(file.path, [occurrence])
+	}
+	return mapped
+}
+
 type CachedReference = Pick<ReferenceCache, 'link' | 'original' | 'position'>
 type CachedEmbedInput = Pick<EmbedCache, 'link' | 'original' | 'position'> | CachedEmbedOccurrence
 

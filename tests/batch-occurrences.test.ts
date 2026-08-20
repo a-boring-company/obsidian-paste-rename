@@ -5,6 +5,7 @@ import {
 	cacheReferenceOccurrences,
 	attachmentTargetDiscovered,
 	groupCachedAttachments,
+	mapCachedOccurrencesByTargetPath,
 	retargetCachedOccurrences,
 	replaceRetargetedCachedOccurrences,
 	encodeMarkdownDestination,
@@ -24,6 +25,68 @@ function embed(link: string, original: string, start: number) {
 }
 
 describe('cached embedded attachment occurrences', () => {
+	it('maps sparse exact references only to requested target paths', () => {
+		// These cached offsets represent references on note lines at least ten lines apart.
+		const sparseLine = (line: number) => line * 100
+		const occurrence = (link: string, original: string, start: number) => ({
+			link,
+			original,
+			start,
+			end: start + original.length,
+			destinationStart: start + 3,
+			destinationEnd: start + 3 + link.length,
+		})
+		const references = [
+			occurrence('assets/animated.gif', '![[assets/animated.gif]]', sparseLine(0)),
+			occurrence('assets/diagram.svg', '![diagram](assets/diagram.svg)', sparseLine(10)),
+			occurrence('assets/hero.png', '![[assets/hero.png]]', sparseLine(20)),
+			occurrence('assets/photo.jpeg', '![photo](assets/photo.jpeg)', sparseLine(30)),
+			occurrence('assets/Caf%C3%A9.png', '![cafe](assets/Caf%C3%A9.png)', sparseLine(40)),
+			occurrence('assets/文書.jpeg', '![[assets/文書.jpeg]]', sparseLine(50)),
+			occurrence('assets/line.svg', '![line](assets/line.svg)', sparseLine(60)),
+			occurrence('assets/hero.png', '![[assets/hero.png|duplicate]]', sparseLine(70)),
+			occurrence('assets/raw Unicode/画像.gif', '![[assets/raw Unicode/画像.gif]]', sparseLine(80)),
+			occurrence('assets/stale.png', '![[assets/stale.png]]', sparseLine(90)),
+			occurrence('attachments/existing.jpeg', '![[attachments/existing.jpeg]]', sparseLine(100)),
+		]
+		const targetPaths = [
+			'assets/animated.gif',
+			'assets/diagram.svg',
+			'assets/hero.png',
+			'assets/photo.jpeg',
+			'assets/Café.png',
+			'assets/文書.jpeg',
+			'assets/line.svg',
+			'assets/raw Unicode/画像.gif',
+		]
+		const resolvedPaths = new Map([
+			['assets/animated.gif', 'assets/animated.gif'],
+			['assets/diagram.svg', 'assets/diagram.svg'],
+			['assets/hero.png', 'assets/hero.png'],
+			['assets/photo.jpeg', 'assets/photo.jpeg'],
+			['assets/Caf%C3%A9.png', 'assets/Café.png'],
+			['assets/文書.jpeg', 'assets/文書.jpeg'],
+			['assets/line.svg', 'assets/line.svg'],
+			['assets/raw Unicode/画像.gif', 'assets/raw Unicode/画像.gif'],
+		])
+		const resolveCalls: string[] = []
+		const mapped = mapCachedOccurrencesByTargetPath(references, targetPaths, link => {
+			resolveCalls.push(link)
+			const path = resolvedPaths.get(link)
+			return path ? { path } : null
+		})
+
+		expect(resolveCalls).toEqual(references.map(reference => reference.link))
+		expect([...mapped.keys()]).toEqual(targetPaths)
+		expect(mapped.get('assets/hero.png')?.map(reference => reference.start)).toEqual([sparseLine(20), sparseLine(70)])
+		expect(mapped.get('assets/Café.png')?.map(reference => reference.original)).toEqual([
+			'![cafe](assets/Caf%C3%A9.png)',
+		])
+		expect(mapped.get('assets/raw Unicode/画像.gif')?.[0].start).toBe(sparseLine(80))
+		expect(mapped.has('assets/stale.png')).toBe(false)
+		expect(mapped.has('attachments/existing.jpeg')).toBe(false)
+	})
+
 	it('groups exact cache occurrences by resolved file path', () => {
 		const content = '![[old.png]]\n![[folder/old.png|Report]]'
 		const first = embed('old.png', '![[old.png]]', 0)
