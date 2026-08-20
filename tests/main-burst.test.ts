@@ -391,7 +391,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(editor.getValue()).toBe(content)
 		expect(diskContent()).toContain('<figure')
 		expect(noticeMessages).toEqual([
-			'Changed 1 attachment, but references could not be synchronized; skipped 1 attachment because the requested change could not be applied.',
+			'Changed 1 attachment, but references could not be synchronized.',
 		])
 	})
 
@@ -414,7 +414,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 
 		expect(editor.getValue()).toBe(content)
 		expect(diskContent()).toBe(content)
-		expect(noticeMessages).toEqual(['Skipped 2 attachments because the requested changes could not be applied.'])
+		expect(noticeMessages).toEqual(['Skipped 1 attachment because the requested change could not be applied.'])
 	})
 
 	it.each([
@@ -542,6 +542,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		const modal = vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({
 			action: 'rename', name: 'first-confirmed.png', applyToRemaining: true,
 		})
+		const exactPreflights = vi.spyOn(plugin, 'prepareBatchSourceExact')
 		const renameImplementation = plugin.renameFile.bind(plugin)
 		const mutations = vi.spyOn(plugin, 'renameFile').mockImplementation(async (...args) => renameImplementation(...args))
 		const mutationOrder: Array<[string, string]> = []
@@ -574,6 +575,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(noticeMessages).toEqual([])
 		expect(mutations.mock.calls.map(call => call[3])).toEqual([false, false, false])
 		expect(batchMutations).toHaveBeenCalledTimes(paths.length)
+		expect(exactPreflights).toHaveBeenCalledTimes(files.length + 1)
 	})
 
 	it('converts an encoded cached reference to a canonical figure in an actual burst', async () => {
@@ -595,6 +597,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		}))
 		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
 		const conversions = vi.spyOn(plugin, 'convertBatchAttachmentToFigure')
+		const exactPreflights = vi.spyOn(plugin, 'prepareBatchSourceExact')
 
 		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
 
@@ -604,6 +607,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(editor.getValue()).toContain('raw%2520%20folder')
 		expect(editor.getValue()).toContain('%C4%90%E1%BB%8Dc')
 		expect(editor.getValue()).toContain('image%25.png')
+		expect(exactPreflights).toHaveBeenCalledTimes(files.length + 1)
 	})
 
 	it('processes GIF, SVG, PNG, and JPEG in one exact burst in task order', async () => {

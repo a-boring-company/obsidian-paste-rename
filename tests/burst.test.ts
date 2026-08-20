@@ -51,7 +51,8 @@ describe('create burst planning', () => {
 		expect(plan.mode).toBe('exact')
 		if (plan.mode !== 'exact') return
 		expect(plan.resolved.map(task => task.id)).toEqual(['first', 'last'])
-		expect(plan.resolved.map(task => task.occurrences[0].link)).toEqual(['assets/first.png', 'assets/last.png'])
+		expect(plan.resolved[0]).toBe(first)
+		expect(plan.resolved[1]).toBe(last)
 		expect(plan.unresolved).toEqual([unresolved])
 	})
 })
@@ -82,7 +83,6 @@ describe('create burst orchestration', () => {
 			prepareExact: () => { throw new Error('one file must remain bounded') },
 			choose: () => ({ action: 'rename', name: 'chosen.png', applyToRemaining: false }),
 			applyBounded: (current, decision, notify) => { applied.push(`${current.id}:${decision.name}:${notify}`) },
-			refreshOccurrences: () => { throw new Error('bounded routing must not refresh exact occurrences') },
 			applyExact: () => { throw new Error('bounded routing must not apply exact mutations') },
 			isCurrent: () => true,
 			notify: message => { notices.push(message) },
@@ -99,7 +99,6 @@ describe('create burst orchestration', () => {
 		const unresolved = task('missing', 'assets/missing.png')
 		let content = '![[assets/first.png]]\n![[assets/second.png]]'
 		const applied: string[] = []
-		const refreshed: string[] = []
 		const notices: string[] = []
 		let choices = 0
 		const result = await orchestrateCreateBurst([first, unresolved, second], {
@@ -112,9 +111,9 @@ describe('create burst orchestration', () => {
 			}),
 			choose: () => { choices += 1; return { action: 'cancel', applyToRemaining: true } },
 			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			refreshOccurrences: (_context, current) => { refreshed.push(current.id); return [exactOccurrence(content, current.file.path)] },
-			applyExact: (_context, current, occurrences, decision, notify) => {
+			applyExact: (_context, current, decision, notify) => {
 				applied.push(`${current.id}:${decision.action}:${notify}`)
+				const occurrences = [exactOccurrence(content, current.file.path)]
 				content = replaceBatchFigureContent(content, `<figure>${current.id}</figure>`, current.file.path, occurrences) as string
 				return 'success'
 			},
@@ -124,7 +123,6 @@ describe('create burst orchestration', () => {
 
 		expect(result).toEqual({ applied: [first, second], notApplied: [unresolved], renamedButUnsynchronized: [] })
 		expect(choices).toBe(1)
-		expect(refreshed).toEqual(['first', 'second'])
 		expect(applied).toEqual(['first:cancel:false', 'second:cancel:false'])
 		expect(content).toBe('<figure>first</figure>\n\n<figure>second</figure>')
 		expect(notices).toEqual(['Skipped 1 attachment because the requested change could not be applied.'])
@@ -141,9 +139,9 @@ describe('create burst orchestration', () => {
 			prepareExact: () => ({ context: 'exact', occurrencesByPath: new Map(tasks.map(current => [current.file.path, [exactOccurrence(content, current.file.path)]])) }),
 			choose: () => ({ action: 'cancel', applyToRemaining: false }),
 			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			refreshOccurrences: (_context, current) => [exactOccurrence(content, current.file.path)],
-			applyExact: (_context, current, occurrences, decision) => {
+			applyExact: (_context, current, decision) => {
 				applied.push(`${current.id}:${decision.action}`)
+				const occurrences = [exactOccurrence(content, current.file.path)]
 				if (decision.action === 'rename') {
 					const currentOccurrences = retargetCachedOccurrences(occurrences, { wiki: newPath, markdown: newPath })
 					const next = replaceBatchAttachmentContent(content, oldPath, newPath, 'short', 'a-much-longer-name', occurrences, currentOccurrences)
@@ -175,9 +173,9 @@ describe('create burst orchestration', () => {
 			prepareExact: () => ({ context: 'exact', occurrencesByPath: new Map(tasks.map(current => [current.file.path, [exactOccurrence(content, current.file.path)]])) }),
 			choose: () => ({ action: 'cancel', applyToRemaining: false }),
 			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			refreshOccurrences: (_context, current) => [exactOccurrence(content, current.file.path)],
-			applyExact: (_context, current, occurrences, decision) => {
+			applyExact: (_context, current, decision) => {
 				applied.push(`${current.id}:${decision.action}`)
+				const occurrences = [exactOccurrence(content, current.file.path)]
 				if (decision.action === 'cancel') {
 					const next = replaceBatchFigureContent(content, '<figure>cancel</figure>', current.file.path, occurrences)
 					if (next === null) return false
@@ -188,7 +186,7 @@ describe('create burst orchestration', () => {
 				const next = replaceBatchAttachmentContent(content, cancelPath, newPath, 'cancel', 'a-much-longer-name', occurrences, currentOccurrences)
 				if (next === content) return false
 				content = next
-				return 'success'
+				return 'success' as const
 			},
 			isCurrent: () => true,
 			notify: () => {},
@@ -214,8 +212,7 @@ describe('create burst orchestration', () => {
 			]) }),
 			choose: () => choices.shift() as typeof choices[number],
 			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			refreshOccurrences: (_context, current) => [exactOccurrence(content, current.file.path)],
-			applyExact: (_context, current, _occurrences, _decision, notify) => {
+			applyExact: (_context, current, _decision, notify) => {
 				expect(notify).toBe(false)
 				return current.id === renamed.id ? 'renamed-but-unsynchronized' : 'not-applied'
 			},
@@ -252,7 +249,6 @@ describe('create burst orchestration', () => {
 			prepareExact: () => ({ failure: 'Skipped 2 attachments because the active note changed' }),
 			choose: () => { throw new Error('failed preparation must not open decisions') },
 			applyBounded: () => { throw new Error('failed preparation must not apply bounded decisions') },
-			refreshOccurrences: () => { throw new Error('failed preparation must not refresh occurrences') },
 			applyExact: () => { throw new Error('failed preparation must not apply exact decisions') },
 			isCurrent: () => true,
 			notify: message => { notices.push(message) },
@@ -261,7 +257,7 @@ describe('create burst orchestration', () => {
 		expect(notices).toEqual(['Skipped 2 attachments because the active note changed'])
 	})
 
-	it('classifies an unavailable refreshed occurrence as not applied', async () => {
+	it('classifies an unavailable exact task as not applied', async () => {
 		const tasks = [task('missing', 'assets/missing.png'), task('unresolved', 'assets/unresolved.png')]
 		const content = '![[assets/missing.png]]'
 		const notices: string[] = []
@@ -271,8 +267,7 @@ describe('create burst orchestration', () => {
 			]) }),
 			choose: () => ({ action: 'cancel', applyToRemaining: false }),
 			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			refreshOccurrences: () => null,
-			applyExact: () => { throw new Error('missing exact occurrences must not be applied') },
+			applyExact: () => 'not-applied' as const,
 			isCurrent: () => true,
 			notify: message => { notices.push(message) },
 		})
@@ -294,7 +289,6 @@ describe('create burst orchestration', () => {
 			prepareExact: fail,
 			choose: fail,
 			applyBounded: fail,
-			refreshOccurrences: fail,
 			applyExact: fail,
 			isCurrent: () => false,
 			notify: (message: string) => { notices.push(message) },
@@ -341,11 +335,10 @@ describe('create burst orchestration', () => {
 		expect(notices).toEqual([])
 	})
 
-	it('stops an apply-to-remaining sequence when cancellation occurs during the first refresh', async () => {
+	it('stops an apply-to-remaining sequence when cancellation occurs during the first exact mutation', async () => {
 		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png'), task('third', 'assets/third.png')]
 		const content = tasks.map(current => `![[${current.file.path}]]`).join('\n')
 		let current = true
-		const refreshed: string[] = []
 		const mutated: string[] = []
 		const notices: string[] = []
 		const result = await orchestrateCreateBurst(tasks, {
@@ -355,41 +348,6 @@ describe('create burst orchestration', () => {
 			}),
 			choose: () => ({ action: 'cancel', applyToRemaining: true }),
 			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			refreshOccurrences: async (_context, currentTask) => {
-				refreshed.push(currentTask.id)
-				await Promise.resolve()
-				current = false
-				return [exactOccurrence(content, currentTask.file.path)]
-			},
-			applyExact: (_context, currentTask) => { mutated.push(currentTask.id); return 'success' },
-			isCurrent: () => current,
-			notify: message => { notices.push(message) },
-		})
-
-		expect(result).toEqual({ applied: [], notApplied: [], renamedButUnsynchronized: [] })
-		expect(refreshed).toEqual(['first'])
-		expect(mutated).toEqual([])
-		expect(notices).toEqual([])
-	})
-
-	it('stops an apply-to-remaining sequence when cancellation occurs during the first mutation', async () => {
-		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png'), task('third', 'assets/third.png')]
-		const content = tasks.map(current => `![[${current.file.path}]]`).join('\n')
-		let current = true
-		const refreshed: string[] = []
-		const mutated: string[] = []
-		const notices: string[] = []
-		const result = await orchestrateCreateBurst(tasks, {
-			prepareExact: () => ({
-				context: 'exact',
-				occurrencesByPath: new Map(tasks.map(currentTask => [currentTask.file.path, [exactOccurrence(content, currentTask.file.path)]])),
-			}),
-			choose: () => ({ action: 'cancel', applyToRemaining: true }),
-			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
-			refreshOccurrences: (_context, currentTask) => {
-				refreshed.push(currentTask.id)
-				return [exactOccurrence(content, currentTask.file.path)]
-			},
 			applyExact: async (_context, currentTask) => {
 				mutated.push(currentTask.id)
 				await Promise.resolve()
@@ -401,7 +359,34 @@ describe('create burst orchestration', () => {
 		})
 
 		expect(result).toEqual({ applied: [], notApplied: [], renamedButUnsynchronized: [] })
-		expect(refreshed).toEqual(['first'])
+		expect(mutated).toEqual(['first'])
+		expect(notices).toEqual([])
+	})
+
+	it('stops an apply-to-remaining sequence when cancellation occurs during the first mutation', async () => {
+		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png'), task('third', 'assets/third.png')]
+		const content = tasks.map(current => `![[${current.file.path}]]`).join('\n')
+		let current = true
+		const mutated: string[] = []
+		const notices: string[] = []
+		const result = await orchestrateCreateBurst(tasks, {
+			prepareExact: () => ({
+				context: 'exact',
+				occurrencesByPath: new Map(tasks.map(currentTask => [currentTask.file.path, [exactOccurrence(content, currentTask.file.path)]])),
+			}),
+			choose: () => ({ action: 'cancel', applyToRemaining: true }),
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			applyExact: async (_context, currentTask) => {
+				mutated.push(currentTask.id)
+				await Promise.resolve()
+				current = false
+				return 'success' as const
+			},
+			isCurrent: () => current,
+			notify: message => { notices.push(message) },
+		})
+
+		expect(result).toEqual({ applied: [], notApplied: [], renamedButUnsynchronized: [] })
 		expect(mutated).toEqual(['first'])
 		expect(notices).toEqual([])
 	})

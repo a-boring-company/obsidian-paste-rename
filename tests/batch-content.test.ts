@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
-import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership, liveBatchFigureChange, prepareExactSourceSnapshot, replaceBatchFigureContent, rollbackBatchSourceWrite } from '../src/batch-content'
+import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership, prepareExactSourceSnapshot, replaceBatchFigureContent, rollbackBatchSourceWrite } from '../src/batch-content'
 import { liveBatchAttachmentChange } from '../src/batch-content'
 import { cacheEmbedOccurrences, retargetCachedOccurrences } from '../src/batch-occurrences'
 import { renderFigure } from '../src/figure'
@@ -54,29 +54,8 @@ describe('batch source content', () => {
 		expect(change?.text).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
 	})
 
-	it('creates one guarded full-document change for exact multi-file figure conversion', () => {
-		const content = '![[assets/first.png]]\ntext\n![[assets/second.png]]'
-		const first = cachedEmbed(content, '![[assets/first.png]]')
-		const secondStart = content.indexOf('![[assets/second.png]]')
-		const occurrences = [
-			...first.map(occurrence => ({ ...occurrence, link: 'assets/first.png' })),
-			...cacheEmbedOccurrences(content, [{
-				link: 'assets/second.png',
-				original: '![[assets/second.png]]',
-				position: {
-					start: { line: 2, col: 0, offset: secondStart },
-					end: { line: 2, col: '![[assets/second.png]]'.length, offset: secondStart + '![[assets/second.png]]'.length },
-				},
-			}]),
-		]
-		const change = liveBatchFigureChange(content, '<figure>new</figure>', 'assets/new.png', occurrences)
-		expect(change?.from).toEqual({ line: 0, ch: 0 })
-		expect(change?.to).toEqual({ line: 2, ch: 22 })
-		expect(change?.text.match(/<figure>new<\/figure>/g)).toHaveLength(2)
-	})
-
-	it('does not create a figure change when exact provenance is unavailable', () => {
-		expect(liveBatchFigureChange('unchanged', '<figure>new</figure>', 'assets/new.png', [])).toBeNull()
+	it('rejects figure conversion when exact provenance is unavailable', () => {
+		expect(replaceBatchFigureContent('unchanged', '<figure>new</figure>', 'assets/new.png', [])).toBeNull()
 		expect(replaceBatchFigureContent('![[assets/old.png]]', '<figure>new</figure>', 'assets/new.png', [{
 			link: 'assets/old.png', original: '![[assets/old.png]]', start: 1, end: 20, destinationStart: 4, destinationEnd: 19,
 		}])).toBeNull()

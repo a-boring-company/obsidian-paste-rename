@@ -33,7 +33,7 @@ import {
 } from './attachment-types';
 import { cancelBurst, createBurstCancellation, CreateBurstDecision, ExactBurstMutationStatus, ExactBurstPreparation, isBurstCancelled, orchestrateCreateBurst, summarizeExactSourcePreparationFailure } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
-import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
+import { BOUNDED_SEARCH_RADIUS, LineEdit, replaceNearCursorInText } from './embed-location';
 import { renderFigure } from './figure';
 import { normalizeFilenameStem } from './filename';
 import { markdownDocumentContextBefore } from './markdown-context';
@@ -273,21 +273,11 @@ export default class PasteRenamePlugin extends Plugin {
 			const generated = this.generateNewName(request.file, request.sourceFile)
 			return { ...request, id: `${index}`, proposedName: generated.newName, stem: generated.stem, isMeaningful: generated.isMeaningful }
 		})
-		const taskById = new Map(tasks.map(task => [task.id, task]))
 		await orchestrateCreateBurst(tasks, {
 			prepareExact: () => this.prepareExactRenameBurst(tasks, generation),
 			choose: (task, hasRemaining) => this.openRenameModal(task, hasRemaining, generation),
-			applyBounded: (task, decision, notify) => this.applyRenameDecision(task, decision, taskById, generation, notify),
-			refreshOccurrences: async (context, task) => {
-				const prepared = await this.prepareBatchSourceExact(context.sourceFile, context.editorSession, generation)
-				if (!prepared.snapshot || !this.isCurrent(generation)) return null
-				return mapCachedOccurrencesByTargetPath(
-					prepared.snapshot.references,
-					[task.file.path],
-					link => this.app.metadataCache.getFirstLinkpathDest(link, context.sourceFile.path),
-				).get(task.file.path) ?? null
-			},
-			applyExact: (context, task, occurrences, decision, notify) => {
+			applyBounded: (task, decision, notify) => this.applyRenameDecision(task, decision, generation, notify),
+			applyExact: async (context, task, decision, notify) => {
 				if (decision.action === 'rename') return this.renameBatchAttachmentOutcome(
 					task.file,
 					decision.name,
@@ -298,6 +288,14 @@ export default class PasteRenamePlugin extends Plugin {
 					true,
 				)
 				if (this.settings.imageOutput !== 'html' || !isImageExtension(task.file.extension, this.attachmentTypes)) return true
+				const prepared = await this.prepareBatchSourceExact(context.sourceFile, context.editorSession, generation)
+				if (!prepared.snapshot || !this.isCurrent(generation)) return 'not-applied'
+				const occurrences = mapCachedOccurrencesByTargetPath(
+					prepared.snapshot.references,
+					[task.file.path],
+					link => this.app.metadataCache.getFirstLinkpathDest(link, context.sourceFile.path),
+				).get(task.file.path)
+				if (!occurrences?.length || !this.isCurrent(generation)) return 'not-applied'
 				return this.convertBatchAttachmentToFigure({ ...task, occurrences }, context.sourceFile, context.editorSession, generation)
 			},
 			isCurrent: () => this.isCurrent(generation),
@@ -413,22 +411,15 @@ export default class PasteRenamePlugin extends Plugin {
 	async applyRenameDecision(
 		task: RenameTask,
 		decision: CreateBurstDecision,
-		taskById: Map<string, RenameTask>,
 		generation = this.cancellation.generation,
 		notify = true,
 	) {
 		if (!this.isCurrent(generation)) return
 		if (decision.action === 'rename') {
-			const result = await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation, notify)
-			if (result.success && result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
+			await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation, notify)
 		} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
-			const result = await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
-			if (result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
+			await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
 		}
-	}
-
-	updateTaskCursors(taskById: Map<string, RenameTask>, edit: LineEdit) {
-		for (const task of taskById.values()) task.cursor = mapCursorAfterLineEdit(task.cursor, edit)
 	}
 
 	async renameFile(

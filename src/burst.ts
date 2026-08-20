@@ -1,4 +1,3 @@
-import type { CachedEmbedOccurrence } from './batch-occurrences'
 import { applyBatchChoice, createBatchChoiceState } from './batch-state'
 
 interface BurstCancellation {
@@ -8,7 +7,7 @@ interface BurstCancellation {
 
 export type CreateBurstPlan<T> =
 	| { mode: 'bounded'; tasks: readonly T[] }
-	| { mode: 'exact'; resolved: Array<T & { occurrences: CachedEmbedOccurrence[] }>; unresolved: T[] }
+	| { mode: 'exact'; resolved: T[]; unresolved: T[] }
 
 export interface CreateBurstDecision {
 	id: string
@@ -42,18 +41,16 @@ interface CreateBurstChoice {
 }
 
 export type ExactBurstPreparation<C> =
-	| { context: C; occurrencesByPath: ReadonlyMap<string, readonly CachedEmbedOccurrence[]> }
+	| { context: C; occurrencesByPath: ReadonlyMap<string, { readonly length: number }> }
 	| { failure: string }
 
 interface CreateBurstOperations<T, C> {
 	prepareExact: () => MaybePromise<ExactBurstPreparation<C>>
 	choose: (task: T, hasRemaining: boolean) => MaybePromise<CreateBurstChoice>
 	applyBounded: (task: T, decision: CreateBurstDecision, notify: true) => MaybePromise<void>
-	refreshOccurrences: (context: C, task: T) => MaybePromise<readonly CachedEmbedOccurrence[] | null>
 	applyExact: (
 		context: C,
 		task: T,
-		occurrences: readonly CachedEmbedOccurrence[],
 		decision: CreateBurstDecision,
 		notify: false,
 	) => MaybePromise<boolean | ExactBurstMutationStatus>
@@ -103,13 +100,7 @@ export async function orchestrateCreateBurst<T extends OrchestratedCreateTask, C
 				if (!operations.isCurrent()) return interruptedResult
 				continue
 			}
-			const occurrences = await operations.refreshOccurrences(context as C, task)
-			if (!operations.isCurrent()) return outcome
-			if (!occurrences?.length) {
-				outcome.notApplied.push(task)
-				continue
-			}
-			const mutation = await operations.applyExact(context as C, task, occurrences, decision, false)
+			const mutation = await operations.applyExact(context as C, task, decision, false)
 			if (!operations.isCurrent()) return outcome
 			if (mutation === false || mutation === 'not-applied') outcome.notApplied.push(task)
 			else if (mutation === 'renamed-but-unsynchronized') outcome.renamedButUnsynchronized.push(task)
@@ -147,11 +138,11 @@ export function summarizeExactSourcePreparationFailure(taskCount: number, _failu
 
 export function planCreateBurst<T extends { file: { path: string } }>(
 	tasks: readonly T[],
-	occurrencesByPath: ReadonlyMap<string, readonly CachedEmbedOccurrence[]>,
+	occurrencesByPath: ReadonlyMap<string, { readonly length: number }>,
 ): CreateBurstPlan<T> {
-	if (tasks.length < 2) return { mode: 'bounded', tasks }
+	if (tasks.length === 1) return { mode: 'bounded', tasks }
 
-	const resolved: Array<T & { occurrences: CachedEmbedOccurrence[] }> = []
+	const resolved: T[] = []
 	const unresolved: T[] = []
 	for (const task of tasks) {
 		const occurrences = occurrencesByPath.get(task.file.path)
@@ -159,7 +150,7 @@ export function planCreateBurst<T extends { file: { path: string } }>(
 			unresolved.push(task)
 			continue
 		}
-		resolved.push({ ...task, occurrences: [...occurrences] })
+		resolved.push(task)
 	}
 	return { mode: 'exact', resolved, unresolved }
 }

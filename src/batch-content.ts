@@ -317,16 +317,6 @@ export function liveBatchAttachmentChange(
 	))
 }
 
-export function liveBatchFigureChange(
-	content: string,
-	replacement: string,
-	replacementPath: string,
-	occurrences: readonly CachedEmbedOccurrence[],
-): DocumentTextChange | null {
-	const nextContent = replaceBatchFigureContent(content, replacement, replacementPath, occurrences)
-	return nextContent === null ? null : fullDocumentChange(content, nextContent)
-}
-
 export function replaceBatchFigureContent(
 	content: string,
 	replacement: string,
