@@ -487,6 +487,30 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(editor.getValue()).toContain('[Report](assets/report-renamed.pdf)')
 	})
 
+	it('retargets an exact image link without converting it to a figure', async () => {
+		const oldPath = 'assets/linked.png'
+		const content = `[Image](${oldPath})`
+		const { diskContent, editor, editorSession, files: [file], plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: [oldPath], content, imageOutput: 'html',
+		})
+		const metadata = plugin.metadataLedger.exact(sourceFile.path, content)
+		if (metadata) {
+			const link = {
+				link: oldPath,
+				original: content,
+				position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 0, col: content.length, offset: content.length } },
+			}
+			plugin.metadataLedger.record(sourceFile.path, content, { ...metadata, links: [link] } as never)
+		}
+
+		const outcome = await plugin.renameBatchAttachmentOutcome(file, 'renamed.png', sourceFile, editorSession, 0, false, true)
+
+		expect(outcome).toBe('success')
+		expect(file.path).toBe('assets/renamed.png')
+		expect(editor.getValue()).toBe('[Image](assets/renamed.png)')
+		expect(diskContent()).toBe('[Image](assets/renamed.png)')
+	})
+
 	it('resolves an eleven-item sparse exact burst before its first decision', async () => {
 		const paths = Array.from({ length: 11 }, (_, index) => `assets/item-${index}.png`)
 		const content = paths.map((path, index) => `${index === 0 ? '' : '\n'.repeat(10)}![[${path}]]`).join('')
@@ -666,6 +690,32 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		const outcome = await plugin.renameBatchAttachmentOutcome(file, file.name, sourceFile, editorSession, 0, false, true)
 
 		expect(outcome).toBe('not-applied')
+		expect(editor.getValue()).toBe(content)
+		expect(diskContent()).toBe(content)
+	})
+
+	it('restores editor and disk when a live exact rename commit rejects after transforming', async () => {
+		const oldPath = 'assets/old.png'
+		const content = `![[${oldPath}]]`
+		const { app, diskContent, editor, editorSession, files: [file], plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: [oldPath], content, imageOutput: 'html',
+		})
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
+		let rejectNext = true
+		vi.spyOn(vault, 'process').mockImplementation(async (target, transform) => {
+			const result = await originalProcess(target, transform)
+			if (rejectNext && result.includes('assets/new.png')) {
+				rejectNext = false
+				throw new Error('rejected after transforming the exact rename')
+			}
+			return result
+		})
+
+		const outcome = await plugin.renameBatchAttachmentOutcome(file, 'new.png', sourceFile, editorSession, 0, false, true)
+
+		expect(outcome).toBe('renamed-but-unsynchronized')
+		expect(file.path).toBe('assets/new.png')
 		expect(editor.getValue()).toBe(content)
 		expect(diskContent()).toBe(content)
 	})

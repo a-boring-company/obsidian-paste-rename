@@ -34,6 +34,7 @@ import {
 import { cancelBurst, createBurstCancellation, CreateBurstDecision, ExactBurstMutationStatus, ExactBurstPreparation, isBurstCancelled, orchestrateCreateBurst, summarizeExactSourcePreparationFailure } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
 import { BOUNDED_SEARCH_RADIUS, LineEdit, replaceNearCursorInText } from './embed-location';
+import { extractReferencePath } from './embeds';
 import { renderFigure } from './figure';
 import { normalizeFilenameStem } from './filename';
 import { markdownDocumentContextBefore } from './markdown-context';
@@ -832,6 +833,7 @@ export default class PasteRenamePlugin extends Plugin {
 		const figureReplacement = exactReferences
 			&& this.settings.imageOutput === 'html'
 			&& isImageExtension(file.extension, this.attachmentTypes)
+			&& oldOccurrences.some(occurrence => extractReferencePath(occurrence.original)?.image === true)
 			? renderFigure({ src: file.path, stem: file.basename, width: this.settings.imageWidth })
 			: undefined
 		if (file.path === oldPath && !figureReplacement) return 'success'
@@ -912,14 +914,30 @@ export default class PasteRenamePlugin extends Plugin {
 		const capturedChange = fullDocumentChange(capturedContent, capturedNextContent)
 		let writeResult: 'written' | 'conflict' | 'cancelled'
 		let liveMutationStarted = false
+		let liveDiskContent: string | null = null
+		const restoreLiveMutation = async (): Promise<boolean> => {
+			if (editorSession.editor.getValue() === capturedNextContent && capturedChange) {
+				const revert = fullDocumentChange(capturedNextContent, capturedContent)
+				try {
+					if (revert) editorSession.editor.transaction({ changes: [revert] })
+				} catch { return false }
+			}
+			if (editorSession.editor.getValue() !== capturedContent) return false
+			if (!liveMutationStarted || liveDiskContent === null) return true
+			if (await rollbackBatchSourceWrite(this.app.vault, sourceFile, capturedNextContent, liveDiskContent)) return true
+			try { return await this.app.vault.read(sourceFile) === liveDiskContent } catch { return false }
+		}
 		try {
 			writeResult = await compareAndWriteVaultText(
 				this.app.vault,
 				sourceFile,
-				content => this.isCurrent(generation)
-					&& this.isBatchEditorSessionBound(editorSession, sourceFile)
-					&& editorSession.editor.getValue() === capturedContent
-					&& batchDiskContentAllowed(content, prepared.content, expectedNativeContent),
+				content => {
+					liveDiskContent = content
+					return this.isCurrent(generation)
+						&& this.isBatchEditorSessionBound(editorSession, sourceFile)
+						&& editorSession.editor.getValue() === capturedContent
+						&& batchDiskContentAllowed(content, prepared.content, expectedNativeContent)
+				},
 				() => this.isCurrent(generation) && this.isBatchEditorSessionBound(editorSession, sourceFile),
 				capturedNextContent,
 				() => {
@@ -932,10 +950,11 @@ export default class PasteRenamePlugin extends Plugin {
 				},
 			)
 		} catch (error) {
+			const restored = await restoreLiveMutation()
 			if (this.isCurrent(generation)) {
 				console.error('Could not save synchronized attachment references', error)
 			}
-			return synchronizationFailure(liveMutationStarted)
+			return synchronizationFailure(liveMutationStarted && !restored)
 		}
 		if (writeResult === 'cancelled' || writeResult === 'conflict') return synchronizationFailure()
 		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return synchronizationFailure(contentChanged)
