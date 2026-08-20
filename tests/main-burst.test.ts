@@ -4,6 +4,7 @@ import type { App, Editor, MarkdownView, PluginManifest, TFile } from 'obsidian'
 
 import PasteRenamePlugin, { DEFAULT_SETTINGS } from '../src/main'
 import { cacheEmbedOccurrences } from '../src/batch-occurrences'
+import { isImageExtension } from '../src/attachment-types'
 import { renderFigure } from '../src/figure'
 import { noticeMessages, TFile as MockTFile } from './mocks/obsidian'
 
@@ -148,10 +149,306 @@ function createLiveHarness(options: LiveHarnessOptions) {
 	return { app, diskContent: () => diskContent, editor, editorSession, file, plugin, sourceFile }
 }
 
+interface BurstProductionHarnessOptions {
+	sourcePath?: string
+	filePaths: readonly string[]
+	content: string
+	diskContent?: string
+	imageOutput?: 'html' | 'markdown'
+	linkForPath?: (path: string) => string
+	recordMetadataOnProcess?: boolean
+	metadataSeedContent?: string
+}
+
+function cachedMetadataFor(value: string) {
+	const embeds: Array<{
+		link: string
+		original: string
+		position: {
+			start: { line: number; col: number; offset: number }
+			end: { line: number; col: number; offset: number }
+		}
+	}> = []
+	const pattern = /!\[\[([^\]\n]+)\]\]/g
+	let match: RegExpExecArray | null
+	while ((match = pattern.exec(value)) !== null) {
+		const original = match[0]
+		const link = match[1].split('|', 1)[0]
+		const line = value.slice(0, match.index).split('\n').length - 1
+		const lineStart = value.lastIndexOf('\n', match.index - 1) + 1
+		embeds.push({
+			link,
+			original,
+			position: {
+				start: { line, col: match.index - lineStart, offset: match.index },
+				end: { line, col: match.index - lineStart + original.length, offset: match.index + original.length },
+			},
+		})
+	}
+	return {
+		cache: { embeds },
+		snapshot: {
+			content: value,
+			embeds: cacheEmbedOccurrences(value, embeds),
+			references: cacheEmbedOccurrences(value, embeds),
+		},
+	}
+}
+
+function createBurstProductionHarness(options: BurstProductionHarnessOptions) {
+	const sourcePath = options.sourcePath ?? 'notes/source.md'
+	const sourceFile = createFile(sourcePath)
+	const files = options.filePaths.map(createFile)
+	const filesByPath = new Map([sourceFile, ...files].map(file => [file.path, file]))
+	const linkForPath = options.linkForPath ?? ((path: string) => path)
+	const editorInitialContent = options.content
+	let editorContent = editorInitialContent
+	let diskContent = options.diskContent ?? editorInitialContent
+	let plugin: PasteRenamePlugin | null = null
+	const recordMetadataOnProcess = options.recordMetadataOnProcess ?? true
+	const metadataResolve = (link: string): TFile | null => {
+		for (const file of files) if (linkForPath(file.path) === link) return file
+		return filesByPath.get(link) ?? null
+	}
+	const recordMetadata = (value: string) => {
+		if (!plugin) return
+		plugin.metadataLedger.record(sourcePath, value, cachedMetadataFor(value).cache as never)
+	}
+	const editor = {
+		getValue: () => editorContent,
+		getCursor: () => ({ line: 0, ch: 0 }),
+		lineCount: () => editorContent.split(/\r?\n/).length,
+		getLine: (line: number) => editorContent.split(/\r?\n/)[line] ?? '',
+		transaction: ({ changes }: { changes: Array<{ from: { line: number; ch: number }; to: { line: number; ch: number }; text: string }> }) => {
+			const change = changes[0]
+			const lines = editorContent.split(/\r?\n/)
+			const offset = (position: { line: number; ch: number }) => lines.slice(0, position.line).reduce((total, line) => total + line.length + 1, 0) + position.ch
+			const start = offset(change.from)
+			const end = offset(change.to)
+			editorContent = `${editorContent.slice(0, start)}${change.text}${editorContent.slice(end)}`
+		},
+	} as unknown as Editor
+	const view = { file: sourceFile, editor, data: editorInitialContent } as MarkdownView
+	const renameFile = vi.fn(async (target: TFile, newPath: string) => {
+		filesByPath.delete(target.path)
+		;(target as unknown as MockTFile).setPath(newPath)
+		filesByPath.set(target.path, target)
+	})
+	const app = {
+		fileManager: {
+			generateMarkdownLink: (file: TFile) => `![[${linkForPath(file.path)}]]`,
+			renameFile,
+		},
+		metadataCache: {
+			fileToLinktext: (file: TFile) => linkForPath(file.path),
+			getFileCache: (): null => null,
+			getFirstLinkpathDest: (link: string) => metadataResolve(link),
+		},
+		vault: {
+			adapter: { list: vi.fn(async () => ({ files: [], folders: [] })) },
+			getAbstractFileByPath: (filePath: string) => filesByPath.get(filePath) ?? null,
+			read: vi.fn(async () => diskContent),
+			process: vi.fn(async (_target: TFile, transform: (value: string) => string) => {
+				diskContent = transform(diskContent)
+				if (recordMetadataOnProcess) recordMetadata(diskContent)
+				return diskContent
+			}),
+		},
+		workspace: { getActiveViewOfType: () => view },
+	} as unknown as App
+	const manifest = {
+		id: 'paste-rename', name: 'Paste Rename', version: '2.0.0', minAppVersion: '1.0.0',
+		description: '', author: '', dir: '.obsidian/plugins/paste-rename',
+	} as PluginManifest
+	plugin = new PasteRenamePlugin(app, manifest)
+	plugin.settings = { ...DEFAULT_SETTINGS, disableRenameNotice: true, imageOutput: options.imageOutput ?? 'html' }
+	const editorSession = { filePath: sourceFile.path, editor, view, baselineContent: editorInitialContent }
+	const seedContent = options.metadataSeedContent ?? editorInitialContent
+	recordMetadata(seedContent)
+	return {
+		app,
+		cacheForContent: (value: string) => cachedMetadataFor(value),
+		diskContent: () => diskContent,
+		editor,
+		editorSession,
+		files,
+		plugin,
+		renameFile,
+		sourceFile,
+	}
+}
+
 beforeEach(() => { noticeMessages.length = 0 })
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('PasteRenamePlugin burst notification boundaries', () => {
+	it('resolves an eleven-item sparse exact burst before its first decision', async () => {
+		const paths = Array.from({ length: 11 }, (_, index) => `assets/item-${index}.png`)
+		const content = paths.map((path, index) => `${index === 0 ? '' : '\n'.repeat(10)}![[${path}]]`).join('')
+			+ `\n![[${paths[0]}]]\n![[assets/existing.jpeg]]`
+		const { cacheForContent, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: [...paths, 'assets/existing.jpeg', 'assets/stale.png'],
+			content,
+			imageOutput: 'html',
+		})
+		const cached = cacheForContent(content)
+		cached.cache.embeds.push({
+			link: 'assets/stale.png',
+			original: '![[assets/stale.png]]',
+			position: {
+				start: { line: 999, col: 0, offset: content.length + 100 },
+				end: { line: 999, col: 21, offset: content.length + 121 },
+			},
+		})
+		plugin.metadataLedger.record(sourceFile.path, content, cached.cache as never)
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: `${file.basename}-default.${file.extension}`,
+			isMeaningful: false,
+		}))
+		const prepare = plugin.prepareExactRenameBurst.bind(plugin)
+		let preparedPaths: string[] = []
+		let preparedCounts = new Map<string, number>()
+		vi.spyOn(plugin, 'prepareExactRenameBurst').mockImplementation(async (...args) => {
+			const result = await prepare(...args)
+			if ('context' in result) {
+				preparedPaths = [...result.occurrencesByPath.keys()]
+				preparedCounts = new Map([...result.occurrencesByPath.entries()].map(([path, occurrences]) => [path, occurrences.length]))
+			}
+			return result
+		})
+		const firstDecisionPaths: string[] = []
+		vi.spyOn(plugin, 'openRenameModal').mockImplementation(async () => {
+			firstDecisionPaths.push(...preparedPaths)
+			return { action: 'cancel', applyToRemaining: true }
+		})
+		const appliedIds: string[] = []
+		vi.spyOn(plugin, 'convertBatchAttachmentToFigure').mockImplementation(async task => {
+			appliedIds.push(task.id)
+			return true
+		})
+
+		await plugin.processRenameBurst(files.slice(0, paths.length).map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(preparedPaths).toEqual(paths)
+		expect(preparedCounts.get(paths[0])).toBe(2)
+		expect(preparedCounts.has('assets/stale.png')).toBe(false)
+		expect(preparedPaths.includes('assets/existing.jpeg')).toBe(false)
+		expect(firstDecisionPaths).toEqual(paths)
+		expect(appliedIds).toEqual(paths.map((_, index) => String(index)))
+	})
+
+	it('renames every exact task in order when one modal choice applies to all remaining files', async () => {
+		const paths = ['assets/first.png', 'assets/second.png', 'assets/third.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'markdown' })
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: `${file.basename}-default.${file.extension}`,
+			isMeaningful: false,
+		}))
+		const modal = vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({
+			action: 'rename', name: 'first-confirmed.png', applyToRemaining: true,
+		})
+		const renameImplementation = plugin.renameFile.bind(plugin)
+		const mutations = vi.spyOn(plugin, 'renameFile').mockImplementation(async (...args) => renameImplementation(...args))
+		const mutationOrder: Array<[string, string]> = []
+		const batchMutationImplementation = plugin.renameBatchAttachmentOutcome.bind(plugin)
+		const batchMutations = vi.spyOn(plugin, 'renameBatchAttachmentOutcome').mockImplementation(async (...args) => {
+			mutationOrder.push([args[0].path, args[1]])
+			return batchMutationImplementation(...args)
+		})
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(modal).toHaveBeenCalledOnce()
+		expect(mutationOrder).toEqual([
+			['assets/first.png', 'first-confirmed.png'],
+			['assets/second.png', 'second-default.png'],
+			['assets/third.png', 'third-default.png'],
+		])
+		expect(mutations.mock.calls.map(call => call[3])).toEqual([false, false, false])
+		expect(batchMutations).toHaveBeenCalledTimes(paths.length)
+	})
+
+	it('converts an encoded cached reference to a canonical figure in an actual burst', async () => {
+		const rawPath = 'assets/raw%20 folder/Đọc image%.png'
+		const encodedPath = rawPath.split('/').map(segment => encodeURIComponent(segment)).join('/')
+		const secondPath = 'assets/second.png'
+		const linkForPath = (path: string) => path.split('/').map(segment => encodeURIComponent(segment)).join('/')
+		const content = `![[${encodedPath}]]\n![[${linkForPath(secondPath)}]]`
+		const { editor, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: [rawPath, secondPath],
+			content,
+			linkForPath,
+			imageOutput: 'html',
+		})
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: file.name,
+			isMeaningful: false,
+		}))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+		const conversions = vi.spyOn(plugin, 'convertBatchAttachmentToFigure')
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(conversions.mock.calls.map(call => call[0].file.path)).toEqual([rawPath, secondPath])
+		expect(editor.getValue()).toContain(`<img src="${encodedPath}"`)
+		expect(editor.getValue()).not.toContain('<img src="../')
+		expect(editor.getValue()).toContain('raw%2520%20folder')
+		expect(editor.getValue()).toContain('%C4%90%E1%BB%8Dc')
+		expect(editor.getValue()).toContain('image%25.png')
+	})
+
+	it('processes GIF, SVG, PNG, and JPEG in one exact burst in task order', async () => {
+		const paths = ['assets/animated.gif', 'assets/diagram.svg', 'assets/hero.png', 'assets/photo.jpeg']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'html' })
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: file.name,
+			isMeaningful: false,
+		}))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+		const conversions = vi.spyOn(plugin, 'convertBatchAttachmentToFigure')
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(files.map(file => file.extension)).toEqual(['gif', 'svg', 'png', 'jpeg'])
+		expect(files.every(file => isImageExtension(file.extension, plugin.attachmentTypes))).toBe(true)
+		expect(conversions.mock.calls.map(call => call[0].file.path)).toEqual(paths)
+		expect(editor.getValue().match(/<figure style="text-align: center;">/g)).toHaveLength(paths.length)
+	})
+
+	it('rolls back an exact preflight failure before opening decisions or mutating attachments', async () => {
+		const paths = ['assets/first.png', 'assets/second.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const originalDisk = 'disk content before the burst'
+		const { diskContent, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: paths,
+			content,
+			diskContent: originalDisk,
+			metadataSeedContent: originalDisk,
+			recordMetadataOnProcess: false,
+		})
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: `${file.basename}-default.${file.extension}`,
+			isMeaningful: false,
+		}))
+		const modal = vi.spyOn(plugin, 'openRenameModal')
+		const rename = vi.spyOn(plugin, 'renameBatchAttachmentOutcome')
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(diskContent()).toBe(originalDisk)
+		expect(files.map(file => file.path)).toEqual(paths)
+		expect(modal).not.toHaveBeenCalled()
+		expect(rename).not.toHaveBeenCalled()
+		expect(noticeMessages).toEqual(['Skipped 2 attachments because the active note could not be synchronized'])
+	})
+
 	it('passes silent outcomes through the exact process and emits only its final notice', async () => {
 		const { editorSession, files, plugin, sourceFile } = createHarness(['assets/one.png', 'assets/two.png'])
 		const snapshot = exactSnapshot(files)
