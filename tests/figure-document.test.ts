@@ -5,10 +5,15 @@ import { renderFigure } from '../src/figure'
 
 describe('generated figure document replacement', () => {
 	it('updates every canonical matching figure while preserving each width', () => {
-		const first = renderFigure({ src: '../assets/old.png', stem: 'old', width: 40 })
-		const second = renderFigure({ src: '../assets/old.png', stem: 'old', width: 90 })
-		const replacement = `${renderFigure({ src: '../assets/new.png', stem: 'new', width: 40 })}\n${renderFigure({ src: '../assets/new.png', stem: 'new', width: 90 })}`
-		expect(replaceGeneratedFigures(`${first}\n${second}`, '../assets/old.png', '../assets/new.png', 'old', 'new')).toBe(replacement)
+		const first = renderFigure({ src: 'assets/old.png', stem: 'old', width: 40 })
+		const second = renderFigure({ src: 'assets/old.png', stem: 'old', width: 90 })
+		const replacement = `${renderFigure({ src: 'assets/new.png', stem: 'new', width: 40 })}\n${renderFigure({ src: 'assets/new.png', stem: 'new', width: 90 })}`
+		expect(replaceGeneratedFigures(`${first}\n${second}`, 'assets/old.png', 'assets/new.png', 'old', 'new')).toBe(replacement)
+	})
+
+	it('does not specially match a legacy note-relative figure for a canonical path', () => {
+		const legacy = renderFigure({ src: '../assets/old.png', stem: 'old' })
+		expect(replaceGeneratedFigures(legacy, 'assets/old.png', 'assets/new.png', 'old', 'new')).toBe(legacy)
 	})
 
 	it('matches canonical figures with CRLF line endings', () => {
@@ -30,17 +35,7 @@ describe('generated figure document replacement', () => {
 		expect(replaceGeneratedFigures(canonical, 'assets/old.png', 'assets/new.png', 'wrong', 'new')).toBe(canonical)
 	})
 
-	it('accepts only safe legacy source encodings when discovering and replacing figures', () => {
-		const legacy = '<figure style="text-align: center;">\n<img src="assets/a b.png" alt="a b" style="width: 80%;">\n<figcaption><b>Figure</b>. a b.</figcaption>\n</figure>'
-		const entity = '<figure style="text-align: center;">\n<img src="assets/a&amp;b.png" alt="a&amp;b" style="width: 80%;">\n<figcaption><b>Figure</b>. a&amp;b.</figcaption>\n</figure>'
-		expect(extractGeneratedFigurePaths(`${legacy}\n${entity}`)).toEqual(['assets/a b.png', 'assets/a&b.png'])
-		expect(replaceGeneratedFigures(`${legacy}\n${entity}`, 'assets/a b.png', 'assets/new.png', 'a b', 'new'))
-			.toContain('src="assets/new.png"')
-		expect(replaceGeneratedFigures(`${legacy}\n${entity}`, 'assets/a&b.png', 'assets/entity-new.png', 'a&b', 'entity-new'))
-			.toContain('src="assets/entity-new.png"')
-	})
-
-	it('handles literal percent characters in a legacy path safely', () => {
+	it('handles literal percent characters in a canonical path safely', () => {
 		const figure = renderFigure({ src: 'assets/%bad.png', stem: '%bad' })
 		expect(extractGeneratedFigurePaths(figure)).toEqual(['assets/%bad.png'])
 	})

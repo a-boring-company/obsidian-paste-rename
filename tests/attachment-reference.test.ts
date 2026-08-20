@@ -55,6 +55,22 @@ describe('attachment reference replacement', () => {
 		}, [cached])?.text).toBe('![[]]')
 	})
 
+	it.each([
+		['shortest wikilink', '![[image.png]]', '![[image.png]]'],
+		['relative Markdown', '![image](../assets/image.png)', '![image](../assets/image.png)'],
+		['absolute wikilink', '![[/assets/image.png]]', '![[/assets/image.png]]'],
+	] as const)('preserves the generated %s destination', (_label, content, expected) => {
+		expect(replaceAttachmentReference({
+			content,
+			cursor: 0,
+			targetPaths: ['image.png', '../assets/image.png', '/assets/image.png'],
+			replacement: expected,
+			replacementPath: expected.includes('(') ? '../assets/image.png' : expected.slice(expected.indexOf('[[') + 2, expected.indexOf(']]')),
+			image: true,
+			asFigure: false,
+		})?.text).toBe(expected)
+	})
+
 	it('recognizes an exact no-op and rejects overlapping cached provenance', () => {
 		const content = '![[assets/old.png]]'
 		const cached = occurrence(content, '![[assets/old.png]]')

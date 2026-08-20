@@ -522,14 +522,14 @@ export default class PasteRenamePlugin extends Plugin {
 		nativeLinkSyncState: AttachmentReferenceState | null = 'old',
 	): Promise<ReferenceReplacement> {
 		if (!this.isCurrent(generation)) return { matched: false, edit: null }
-		const currentPath = relativeAttachmentPath(sourcePath, file.path)
+		const canonicalPath = file.path
 		const targetPaths = targetGroups.old
 		const image = isImageExtension(file.extension, this.attachmentTypes)
 		const asFigure = image && this.settings.imageOutput === 'html'
 		const desiredLinkText = image && !newLinkText.startsWith('!') ? `!${newLinkText}` : newLinkText
-		const replacementPath = extractGeneratedDestination(newLinkText) ?? currentPath
+		const replacementPath = extractGeneratedDestination(newLinkText) ?? canonicalPath
 		const replacement = asFigure
-			? renderFigure({ src: currentPath, stem: file.basename, width: this.settings.imageWidth })
+			? renderFigure({ src: canonicalPath, stem: file.basename, width: this.settings.imageWidth })
 			: desiredLinkText
 		const figureImageLine = asFigure ? replacement.split('\n')[1] : ''
 		const result = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
@@ -754,7 +754,7 @@ export default class PasteRenamePlugin extends Plugin {
 		const grouped = new Map(groups.map(group => [group.file.path, group]))
 		for (const link of extractGeneratedFigurePaths(prepared.content)) {
 			const file = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
-			if (file && isEligibleAttachmentExtension(file.extension, this.attachmentTypes) && !grouped.has(file.path)) grouped.set(file.path, { file })
+			if (file && file.path === link && isEligibleAttachmentExtension(file.extension, this.attachmentTypes) && !grouped.has(file.path)) grouped.set(file.path, { file })
 		}
 		return [...grouped.values()]
 	}
@@ -776,7 +776,7 @@ export default class PasteRenamePlugin extends Plugin {
 		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
 		const generatedPaths = extractGeneratedFigurePaths(prepared.content).filter(link => {
 			const generatedFile = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
-			return generatedFile !== null && isEligibleAttachmentExtension(generatedFile.extension, this.attachmentTypes)
+			return generatedFile !== null && generatedFile.path === link && isEligibleAttachmentExtension(generatedFile.extension, this.attachmentTypes)
 		})
 		if (!attachmentTargetDiscovered(
 			freshGroups,
@@ -796,8 +796,6 @@ export default class PasteRenamePlugin extends Plugin {
 		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
 		if (file.path === oldPath) return 'success'
 		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
-		const oldRelativePath = relativeAttachmentPath(sourceFile.path, oldPath)
-		const newRelativePath = relativeAttachmentPath(sourceFile.path, file.path)
 		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourceFile.path)
 		const wikiDestination = this.app.metadataCache.fileToLinktext(file, sourceFile.path, false)
 		const markdownFallback = wikiDestination === file.name || wikiDestination === file.basename
@@ -823,8 +821,8 @@ export default class PasteRenamePlugin extends Plugin {
 					}
 					return replaceBatchAttachmentContent(
 						content,
-						oldRelativePath,
-						newRelativePath,
+						oldPath,
+						file.path,
 						oldStem,
 						file.basename,
 						oldOccurrences,
@@ -853,8 +851,8 @@ export default class PasteRenamePlugin extends Plugin {
 		}
 		const capturedNextContent = replaceBatchAttachmentContent(
 			capturedContent,
-			oldRelativePath,
-			newRelativePath,
+			oldPath,
+			file.path,
 			oldStem,
 			file.basename,
 			oldOccurrences,
@@ -862,8 +860,8 @@ export default class PasteRenamePlugin extends Plugin {
 		)
 		const capturedChange = liveBatchAttachmentChange(
 			capturedContent,
-			oldRelativePath,
-			newRelativePath,
+			oldPath,
+			file.path,
 			oldStem,
 			file.basename,
 			oldOccurrences,
