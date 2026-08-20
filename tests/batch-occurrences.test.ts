@@ -68,6 +68,7 @@ describe('cached embedded attachment occurrences', () => {
 			['assets/文書.jpeg', 'assets/文書.jpeg'],
 			['assets/line.svg', 'assets/line.svg'],
 			['assets/raw Unicode/画像.gif', 'assets/raw Unicode/画像.gif'],
+			['attachments/existing.jpeg', 'attachments/existing.jpeg'],
 		])
 		const resolveCalls: string[] = []
 		const mapped = mapCachedOccurrencesByTargetPath(references, targetPaths, link => {

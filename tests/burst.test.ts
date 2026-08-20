@@ -37,6 +37,13 @@ describe('create burst planning', () => {
 
 		expect(planCreateBurst([first], occurrencesByPath)).toEqual({ mode: 'bounded', tasks: [first] })
 
+		const boundaryPlan = planCreateBurst([first, unresolved], occurrencesByPath)
+		expect(boundaryPlan.mode).toBe('exact')
+		if (boundaryPlan.mode === 'exact') {
+			expect(boundaryPlan.resolved.map(task => task.id)).toEqual(['first'])
+			expect(boundaryPlan.unresolved).toEqual([unresolved])
+		}
+
 		const plan = planCreateBurst([first, unresolved, last], occurrencesByPath)
 		expect(plan.mode).toBe('exact')
 		if (plan.mode !== 'exact') return
