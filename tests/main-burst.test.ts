@@ -688,6 +688,45 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(noticeMessages).toEqual(['Skipped 2 attachments because the active note could not be synchronized'])
 	})
 
+	it('verifies and rolls back a preflight write that rejects after applying its transform', async () => {
+		const paths = ['assets/first.png', 'assets/second.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const originalDisk = 'disk content before the rejected write'
+		const { app, diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: paths,
+			content,
+			diskContent: originalDisk,
+			baselineContent: originalDisk,
+			metadataSeedContent: originalDisk,
+			recordMetadataOnProcess: false,
+		})
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		const modal = vi.spyOn(plugin, 'openRenameModal')
+		const rename = vi.spyOn(plugin, 'renameBatchAttachmentOutcome')
+		const figure = vi.spyOn(plugin, 'convertBatchAttachmentToFigure')
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vault.process.bind(vault)
+		let rejectNext = true
+		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
+			const result = await originalProcess(file, transform)
+			if (rejectNext) {
+				rejectNext = false
+				throw new Error(`rejected after applying ${result.length} characters`)
+			}
+			return result
+		})
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(diskContent()).toBe(originalDisk)
+		expect(editor.getValue()).toBe(content)
+		expect(files.map(file => file.path)).toEqual(paths)
+		expect(modal).not.toHaveBeenCalled()
+		expect(rename).not.toHaveBeenCalled()
+		expect(figure).not.toHaveBeenCalled()
+		expect(noticeMessages).toEqual(['Skipped 2 attachments because the active note could not be synchronized'])
+	})
+
 	it('passes silent outcomes through the exact process and emits only its final notice', async () => {
 		const { editorSession, files, plugin, sourceFile } = createHarness(['assets/one.png', 'assets/two.png'])
 		const snapshot = exactSnapshot(files)

@@ -42,7 +42,23 @@ export async function prepareExactSourceSnapshot<T>(options: ExactSourcePrefligh
 	try {
 		if (!options.isCurrent() || !isSnapshotCurrent()) return fail('cancelled')
 		if (options.snapshot !== options.disk) {
-			const writeResult = await options.writeSnapshot()
+			let writeResult: 'written' | 'conflict' | 'cancelled'
+			try {
+				writeResult = await options.writeSnapshot()
+			} catch {
+				let persisted: string
+				try {
+					persisted = await options.readDisk()
+				} catch {
+					return { value: null, failure: 'rollback' }
+				}
+				if (persisted === options.snapshot) {
+					wroteSnapshot = true
+					return fail('synchronize')
+				}
+				if (persisted === options.disk) return { value: null, failure: 'synchronize' }
+				return { value: null, failure: 'rollback' }
+			}
 			if (writeResult !== 'written') return fail(writeResult === 'cancelled' ? 'cancelled' : 'synchronize')
 			wroteSnapshot = true
 			if (!options.isCurrent() || !isSnapshotCurrent()) return fail('cancelled')

@@ -177,6 +177,7 @@ describe('batch source content', () => {
 	})
 
 	it('returns synchronization failure when the interim source write throws', async () => {
+		let rollbacks = 0
 		const result = await prepareExactSourceSnapshot({
 			snapshot: 'snapshot',
 			disk: 'baseline',
@@ -184,10 +185,62 @@ describe('batch source content', () => {
 			writeSnapshot: async () => { throw new Error('write failed') },
 			readExactCache: (): null => null,
 			readDisk: async () => 'snapshot',
-			rollbackSnapshot: async () => true,
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
 			advanceBaseline: () => true,
 		})
 		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(1)
+	})
+
+	it('returns synchronization when a rejected write left the original disk snapshot', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async () => { throw new Error('write rejected before persistence') },
+			readExactCache: (): null => null,
+			readDisk: async () => 'baseline',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(0)
+	})
+
+	it.each([
+		['unknown', async (): Promise<string> => 'external'],
+		['unreadable', async (): Promise<string> => { throw new Error('read failed') }],
+	] as const)('returns rollback when a rejected write is %s to verify', async (_label, readDisk) => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async () => { throw new Error('write rejected') },
+			readExactCache: (): null => null,
+			readDisk,
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'rollback' })
+		expect(rollbacks).toBe(0)
+	})
+
+	it('returns rollback when a rejected applied write cannot be restored', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async () => { throw new Error('write rejected after persistence') },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { rollbacks += 1; return false },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'rollback' })
+		expect(rollbacks).toBe(1)
 	})
 
 	it('rolls back when cancellation happens immediately after the interim write', async () => {
