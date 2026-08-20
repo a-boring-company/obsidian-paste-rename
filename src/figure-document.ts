@@ -1,4 +1,3 @@
-import { pathsEqual } from './embeds'
 import { renderFigure } from './figure'
 import { advanceMarkdownDocumentContext, emptyMarkdownDocumentContext } from './markdown-context'
 
@@ -73,7 +72,7 @@ function stemFromPath(path: string): string {
 
 function isOwnedGeneratedFigure(block: GeneratedFigureBlock, expectedPath?: string, expectedStem?: string): boolean {
 	const decodedPath = decodeGeneratedFigureSource(block.source)
-	if (!decodedPath || decodedPath.endsWith('/') || (expectedPath !== undefined && !pathsEqual(decodedPath, expectedPath))) return false
+	if (!decodedPath || decodedPath.endsWith('/') || (expectedPath !== undefined && decodedPath !== expectedPath)) return false
 	const stem = stemFromPath(decodedPath)
 	if (expectedStem !== undefined && stem !== expectedStem) return false
 	if (decodeHtmlAttribute(block.alt) !== stem || decodeHtmlAttribute(block.caption) !== stem.replace(/_/g, ' ')) return false

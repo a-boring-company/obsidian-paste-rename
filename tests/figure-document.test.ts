@@ -16,6 +16,14 @@ describe('generated figure document replacement', () => {
 		expect(replaceGeneratedFigures(legacy, 'assets/old.png', 'assets/new.png', 'old', 'new')).toBe(legacy)
 	})
 
+	it('keeps literal percent identity distinct from a decoded space', () => {
+		const spaceFigure = renderFigure({ src: 'assets/raw folder/image.png', stem: 'image' })
+		const percentFigure = renderFigure({ src: 'assets/raw%20folder/image.png', stem: 'image' })
+
+		expect(replaceGeneratedFigures(spaceFigure, 'assets/raw%20folder/image.png', 'assets/new.png', 'image', 'new')).toBe(spaceFigure)
+		expect(replaceGeneratedFigures(percentFigure, 'assets/raw folder/image.png', 'assets/new.png', 'image', 'new')).toBe(percentFigure)
+	})
+
 	it('matches canonical figures with CRLF line endings', () => {
 		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' }).replace(/\n/g, '\r\n')
 		const newFigure = renderFigure({ src: 'assets/new.png', stem: 'new' }).replace(/\n/g, '\r\n')

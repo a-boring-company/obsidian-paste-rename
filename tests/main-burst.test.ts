@@ -4,6 +4,7 @@ import type { App, Editor, MarkdownView, PluginManifest, TFile } from 'obsidian'
 
 import PasteRenamePlugin, { DEFAULT_SETTINGS } from '../src/main'
 import { cacheEmbedOccurrences } from '../src/batch-occurrences'
+import { renderFigure } from '../src/figure'
 import { noticeMessages, TFile as MockTFile } from './mocks/obsidian'
 
 function createFile(filePath: string): TFile {
@@ -80,9 +81,19 @@ function request(file: TFile, sourceFile: TFile) {
 	}
 }
 
-function createLiveHarness(filePath: string, content: string) {
-	const sourceFile = createFile('notes/deep/source.md')
-	const file = createFile(filePath)
+interface LiveHarnessOptions {
+	sourcePath: string
+	filePath: string
+	generatedLink: string
+	content?: string
+	imageOutput?: 'html' | 'markdown'
+	metadataResolve?: (link: string, filesByPath: Map<string, TFile>) => TFile | null
+}
+
+function createLiveHarness(options: LiveHarnessOptions) {
+	const sourceFile = createFile(options.sourcePath)
+	const file = createFile(options.filePath)
+	const content = options.content ?? options.generatedLink
 	let editorContent = content
 	let diskContent = content
 	const editor = {
@@ -101,9 +112,10 @@ function createLiveHarness(filePath: string, content: string) {
 	} as unknown as Editor
 	const view = { file: sourceFile, editor, data: content } as MarkdownView
 	const filesByPath = new Map([[sourceFile.path, sourceFile], [file.path, file]])
+	const resolveMetadata = options.metadataResolve ?? ((link: string, availableFiles: Map<string, TFile>) => availableFiles.get(link) ?? null)
 	const app = {
 		fileManager: {
-			generateMarkdownLink: () => `![[${file.path}]]`,
+			generateMarkdownLink: () => options.generatedLink,
 			renameFile: vi.fn(async (target: TFile, newPath: string) => {
 				filesByPath.delete(target.path)
 				;(target as unknown as MockTFile).setPath(newPath)
@@ -111,7 +123,7 @@ function createLiveHarness(filePath: string, content: string) {
 			}),
 		},
 		metadataCache: {
-			getFirstLinkpathDest: (link: string) => filesByPath.get(link) ?? null,
+			getFirstLinkpathDest: (link: string) => resolveMetadata(link, filesByPath),
 			fileToLinktext: (target: TFile) => target.path,
 			getFileCache: (): null => null,
 		},
@@ -131,7 +143,7 @@ function createLiveHarness(filePath: string, content: string) {
 		description: '', author: '', dir: '.obsidian/plugins/paste-rename',
 	} as PluginManifest
 	const plugin = new PasteRenamePlugin(app, manifest)
-	plugin.settings = { ...DEFAULT_SETTINGS, disableRenameNotice: true, imageOutput: 'html' }
+	plugin.settings = { ...DEFAULT_SETTINGS, disableRenameNotice: true, imageOutput: options.imageOutput ?? 'html' }
 	const editorSession = { filePath: sourceFile.path, editor, view, baselineContent: content }
 	return { app, diskContent: () => diskContent, editor, editorSession, file, plugin, sourceFile }
 }
@@ -194,7 +206,9 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 	})
 
 	it('uses the canonical file path for ordinary nested-note figure conversion', async () => {
-		const { editor, file, plugin, sourceFile } = createLiveHarness('assets/image.png', '![[assets/image.png]]')
+		const { editor, file, plugin, sourceFile } = createLiveHarness({
+			sourcePath: 'notes/deep/source.md', filePath: 'assets/image.png', generatedLink: '![[assets/image.png]]',
+		})
 
 		const result = await plugin.replaceAttachmentReference(file, sourceFile.path, file.path, { line: 0, ch: 0 }, 0)
 
@@ -204,8 +218,10 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 	})
 
 	it('uses canonical old and new paths for manual batch figure rename', async () => {
-		const oldFigure = '<figure style="text-align: center;">\n<img src="assets/old.png" alt="old" style="width: 80%;">\n<figcaption><b>Figure</b>. old.</figcaption>\n</figure>'
-		const { editor, editorSession, file, plugin, sourceFile } = createLiveHarness('assets/old.png', oldFigure)
+		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' })
+		const { editor, editorSession, file, plugin, sourceFile } = createLiveHarness({
+			sourcePath: 'notes/deep/source.md', filePath: 'assets/old.png', generatedLink: '![[assets/old.png]]', content: oldFigure,
+		})
 		vi.spyOn(plugin, 'prepareBatchSource').mockResolvedValue({ content: oldFigure, embeds: [], references: [] })
 		vi.spyOn(plugin, 'waitForBatchEditorContent').mockResolvedValue({ ready: true })
 		vi.spyOn(plugin, 'renameFile').mockImplementation(async (target, _name) => {
@@ -218,6 +234,68 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(result).toBe('success')
 		expect(editor.getValue()).toContain('<img src="assets/new.png"')
 		expect(editor.getValue()).not.toContain('<img src="../assets/new.png"')
+	})
+
+	it.each([
+		['vault root PNG', 'note.md', 'image.png'],
+		['fixed root folder PNG', 'notes/topic.md', 'assets/image.png'],
+		['current-note folder SVG', 'notes/topic.md', 'notes/image.svg'],
+		['current-note subfolder GIF', 'notes/topic.md', 'notes/current/image.gif'],
+		['literal percent JPEG', 'notes/topic.md', 'assets/raw%20folder/photo%.jpeg'],
+		['space PNG', 'notes/topic.md', 'assets/photo space.png'],
+		['Unicode PNG', 'notes/topic.md', 'assets/Đọc image.png'],
+	] as const)('renders the canonical raw TFile.path exactly once for %s', async (_label, sourcePath, filePath) => {
+		const { editor, file, plugin, sourceFile } = createLiveHarness({
+			sourcePath,
+			filePath,
+			generatedLink: `![[${filePath}]]`,
+		})
+
+		const result = await plugin.replaceAttachmentReference(file, sourceFile.path, file.path, { line: 0, ch: 0 }, 0)
+		const encodedPath = filePath.split('/').map(segment => encodeURIComponent(segment)).join('/')
+
+		expect(result.matched).toBe(true)
+		expect(editor.getValue()).toContain(`<img src="${encodedPath}"`)
+	})
+
+	it.each([
+		['shortest Wikilink', 'notes/topic.md', '![[image.png]]'],
+		['relative Markdown', 'notes/deep/topic.md', '![image](../../assets/image.png)'],
+		['absolute Wikilink', 'notes/topic.md', '![[/assets/image.png]]'],
+	] as const)('keeps generated %s destinations in container references', async (_label, sourcePath, generatedLink) => {
+		const content = `- ${generatedLink}`
+		const { editor, file, plugin, sourceFile } = createLiveHarness({
+			sourcePath,
+			filePath: 'assets/image.png',
+			generatedLink,
+			content,
+		})
+
+		const result = await plugin.replaceAttachmentReference(file, sourceFile.path, file.path, { line: 0, ch: content.indexOf('[') }, 0)
+
+		expect(result.matched).toBe(true)
+		expect(editor.getValue()).toBe(content)
+	})
+
+	it('resolves generated figures through exact vault paths when metadata best match is a decoy', async () => {
+		const decoy = createFile('notes/deep/assets/image.png')
+		const content = renderFigure({ src: 'assets/image.png', stem: 'image' })
+		const { editorSession, file, plugin, sourceFile } = createLiveHarness({
+			sourcePath: 'notes/deep/source.md',
+			filePath: 'assets/image.png',
+			generatedLink: '![[assets/image.png]]',
+			content,
+			metadataResolve: () => decoy,
+		})
+		vi.spyOn(plugin, 'prepareBatchSource').mockResolvedValue({ content, embeds: [], references: [] })
+		const groups = await plugin.scanBatchAttachments(sourceFile, editorSession, 0)
+		expect(groups?.map(group => group.file.path)).toEqual(['assets/image.png'])
+		vi.spyOn(plugin, 'renameFile').mockResolvedValue({ success: true, edit: null })
+
+		const outcome = await plugin.renameBatchAttachmentOutcome(file, 'image.png', sourceFile, editorSession, 0, false)
+
+		expect(outcome).toBe('success')
+		expect(plugin.renameFile).toHaveBeenCalledOnce()
 	})
 
 	it('keeps manual batch rename notices enabled through the structured outcome', async () => {

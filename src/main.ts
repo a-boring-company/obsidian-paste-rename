@@ -753,7 +753,7 @@ export default class PasteRenamePlugin extends Plugin {
 		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
 		const grouped = new Map(groups.map(group => [group.file.path, group]))
 		for (const link of extractGeneratedFigurePaths(prepared.content)) {
-			const file = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
+			const file = this.getExactVaultFile(link)
 			if (file && file.path === link && isEligibleAttachmentExtension(file.extension, this.attachmentTypes) && !grouped.has(file.path)) grouped.set(file.path, { file })
 		}
 		return [...grouped.values()]
@@ -775,14 +775,14 @@ export default class PasteRenamePlugin extends Plugin {
 			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
 		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
 		const generatedPaths = extractGeneratedFigurePaths(prepared.content).filter(link => {
-			const generatedFile = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
+			const generatedFile = this.getExactVaultFile(link)
 			return generatedFile !== null && generatedFile.path === link && isEligibleAttachmentExtension(generatedFile.extension, this.attachmentTypes)
 		})
 		if (!attachmentTargetDiscovered(
 			freshGroups,
 			generatedPaths,
 			file.path,
-			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+			link => this.getExactVaultFile(link),
 		)) {
 			if (notify && this.isCurrent(generation)) new Notice(`Could not revalidate ${file.name} in the active note`)
 			return 'not-applied'
@@ -1051,6 +1051,10 @@ export default class PasteRenamePlugin extends Plugin {
 		const file = view?.file
 		debugLog('active file', file?.path)
 		return file
+	}
+	getExactVaultFile(filePath: string): TFile | null {
+		const file = this.app.vault.getAbstractFileByPath(filePath)
+		return file instanceof TFile ? file : null
 	}
 	getBatchEditorSession(file: TFile): BatchEditorSession<Editor, MarkdownView> | null {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView)
