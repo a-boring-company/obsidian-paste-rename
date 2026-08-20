@@ -225,6 +225,25 @@ describe('batch source content', () => {
 		expect(waits).toBe(1)
 	})
 
+	it('rolls back when the editor drifts while reading the post-cache disk snapshot', async () => {
+		let current = true
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			isSnapshotCurrent: () => current,
+			writeSnapshot: async () => 'written',
+			readExactCache: () => ({ fingerprint: 'exact' }),
+			readDisk: async () => { current = false; return 'snapshot' },
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+		expect(rollbacks).toBe(1)
+	})
+
 	it('continues polling when cache or disk reads fail and reports a baseline failure', async () => {
 		let cacheReads = 0
 		const result = await prepareExactSourceSnapshot({

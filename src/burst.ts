@@ -16,12 +16,13 @@ export interface CreateBurstDecision {
 	name: string
 }
 
-export type ExactBurstMutationStatus = 'success' | 'not-applied' | 'renamed-but-unsynchronized'
+export type ExactBurstMutationStatus = 'success' | 'not-applied' | 'renamed-but-unsynchronized' | 'partially-applied'
 
 export interface ExactBurstMutationResult<T> {
 	applied: T[]
 	notApplied: T[]
 	renamedButUnsynchronized: T[]
+	partiallyApplied?: T[]
 }
 
 type MaybePromise<T> = T | Promise<T>
@@ -112,6 +113,7 @@ export async function orchestrateCreateBurst<T extends OrchestratedCreateTask, C
 			if (!operations.isCurrent()) return outcome
 			if (mutation === false || mutation === 'not-applied') outcome.notApplied.push(task)
 			else if (mutation === 'renamed-but-unsynchronized') outcome.renamedButUnsynchronized.push(task)
+			else if (mutation === 'partially-applied') (outcome.partiallyApplied ??= []).push(task)
 			else outcome.applied.push(task)
 		}
 	}
@@ -124,10 +126,14 @@ export async function orchestrateCreateBurst<T extends OrchestratedCreateTask, C
 
 export function summarizeExactBurstOutcome<T>(result: ExactBurstMutationResult<T>): string | null {
 	const renamedCount = result.renamedButUnsynchronized.length
+	const partiallyAppliedCount = result.partiallyApplied?.length ?? 0
 	const skippedCount = result.notApplied.length
 	const notices: string[] = []
 	if (renamedCount > 0) {
 		notices.push(`Renamed ${renamedCount} attachment${renamedCount === 1 ? '' : 's'}, but references could not be synchronized`)
+	}
+	if (partiallyAppliedCount > 0) {
+		notices.push(`Changed ${partiallyAppliedCount} attachment${partiallyAppliedCount === 1 ? '' : 's'}, but references could not be synchronized`)
 	}
 	if (skippedCount > 0) {
 		notices.push(`${notices.length > 0 ? 'skipped' : 'Skipped'} ${skippedCount} attachment${skippedCount === 1 ? '' : 's'} because the requested change${skippedCount === 1 ? '' : 's'} could not be applied`)

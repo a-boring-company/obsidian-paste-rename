@@ -206,7 +206,9 @@ export function replaceCachedAttachmentReferences(
 			const figure = replaceCandidate(input.content, candidate, input.replacement)
 			return { start: candidate.start, end: candidate.end, text: figure.replacementText as string }
 		}
-		const replacementPath = input.replacementPath ?? extractGeneratedDestination(input.replacement) ?? input.replacement
+		const replacementPath = input.asFigure
+			? reference.path
+			: input.replacementPath ?? extractGeneratedDestination(input.replacement) ?? input.replacement
 		return { start: reference.destinationStart, end: reference.destinationEnd, text: replacementPath }
 	}).sort((left, right) => left.start - right.start)
 	for (let index = 1; index < replacements.length; index++) {

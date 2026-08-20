@@ -15,6 +15,7 @@ interface ExactSourcePreflightOptions<T> {
 	snapshot: string
 	disk: string
 	isCurrent: () => boolean
+	isSnapshotCurrent?: () => boolean
 	writeSnapshot: () => Promise<'written' | 'conflict' | 'cancelled'>
 	readExactCache: () => T | null | Promise<T | null>
 	readDisk: () => Promise<string>
@@ -26,6 +27,7 @@ interface ExactSourcePreflightOptions<T> {
 
 export async function prepareExactSourceSnapshot<T>(options: ExactSourcePreflightOptions<T>): Promise<ExactSourcePreflightResult<T>> {
 	let wroteSnapshot = false
+	const isSnapshotCurrent = options.isSnapshotCurrent ?? (() => true)
 	const fail = async (failure: ExactSourcePreflightFailure): Promise<ExactSourcePreflightResult<T>> => {
 		if (!wroteSnapshot) return { value: null, failure }
 		let restored = false
@@ -38,27 +40,30 @@ export async function prepareExactSourceSnapshot<T>(options: ExactSourcePrefligh
 	}
 
 	try {
-		if (!options.isCurrent()) return fail('cancelled')
+		if (!options.isCurrent() || !isSnapshotCurrent()) return fail('cancelled')
 		if (options.snapshot !== options.disk) {
 			const writeResult = await options.writeSnapshot()
 			if (writeResult !== 'written') return fail(writeResult === 'cancelled' ? 'cancelled' : 'synchronize')
 			wroteSnapshot = true
-			if (!options.isCurrent()) return fail('cancelled')
+			if (!options.isCurrent() || !isSnapshotCurrent()) return fail('cancelled')
 		}
 		const attempts = Math.max(1, options.retries ?? 1)
 		const cached = await retryBounded(attempts, async attempt => {
-			if (!options.isCurrent()) return null
+			if (!options.isCurrent() || !isSnapshotCurrent()) return null
 			try {
 				const cache = await options.readExactCache()
-				if (cache !== null && await options.readDisk() === options.snapshot) return cache
+				if (!options.isCurrent() || !isSnapshotCurrent()) return null
+				const disk = await options.readDisk()
+				if (!options.isCurrent() || !isSnapshotCurrent()) return null
+				if (cache !== null && disk === options.snapshot) return cache
 			} catch {
 				// Keep polling until the exact cache and disk content agree.
 			}
 			if (attempt + 1 < attempts && options.wait) await options.wait()
 			return null
-		}, () => !options.isCurrent())
-		if (cached === null) return fail(options.isCurrent() ? 'synchronize' : 'cancelled')
-		if (!options.isCurrent() || !options.advanceBaseline()) return fail('cancelled')
+		}, () => !options.isCurrent() || !isSnapshotCurrent())
+		if (cached === null) return fail(options.isCurrent() && isSnapshotCurrent() ? 'synchronize' : 'cancelled')
+		if (!options.isCurrent() || !isSnapshotCurrent() || !options.advanceBaseline() || !isSnapshotCurrent()) return fail('cancelled')
 		return { value: cached, failure: null }
 	} catch {
 		return fail('synchronize')

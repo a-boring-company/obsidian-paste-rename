@@ -284,6 +284,196 @@ beforeEach(() => { noticeMessages.length = 0 })
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('PasteRenamePlugin burst notification boundaries', () => {
+	it('rejects an exact burst when the active editor changes during source capture', async () => {
+		const paths = ['assets/first.png', 'assets/second.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { app, diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: paths,
+			content,
+			baselineContent: content,
+		})
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		const originalRead = (app.vault as unknown as { read: (file: TFile) => Promise<string> }).read
+		let changed = false
+		vi.spyOn(app.vault as unknown as { read: (file: TFile) => Promise<string> }, 'read').mockImplementation(async file => {
+			const value = await originalRead(file)
+			if (!changed) {
+				changed = true
+				editor.transaction({ changes: [{ from: { line: 1, ch: content.split('\n')[1].length }, to: { line: 1, ch: content.split('\n')[1].length }, text: ' user edit' }] })
+			}
+			return value
+		})
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(editor.getValue()).toContain('user edit')
+		expect(diskContent()).toBe(content)
+		expect(plugin.openRenameModal).not.toHaveBeenCalled()
+		expect(noticeMessages).toEqual(['Skipped 2 attachments because the active note could not be synchronized'])
+	})
+
+	it('rolls back an exact burst when the active editor changes during cache polling', async () => {
+		const paths = ['assets/first.png', 'assets/second.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const originalDisk = 'note text before the burst'
+		const { diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: paths,
+			content,
+			diskContent: originalDisk,
+			baselineContent: originalDisk,
+			metadataSeedContent: originalDisk,
+		})
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		const exact = plugin.metadataLedger.exact.bind(plugin.metadataLedger)
+		let changed = false
+		vi.spyOn(plugin.metadataLedger, 'exact').mockImplementation((path, snapshot) => {
+			const result = exact(path, snapshot)
+			if (!changed) {
+				changed = true
+				editor.transaction({ changes: [{ from: { line: 1, ch: content.split('\n')[1].length }, to: { line: 1, ch: content.split('\n')[1].length }, text: ' user edit' }] })
+			}
+			return result
+		})
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(editor.getValue()).toContain('user edit')
+		expect(diskContent()).toBe(originalDisk)
+		expect(plugin.openRenameModal).not.toHaveBeenCalled()
+		expect(noticeMessages).toEqual(['Skipped 2 attachments because the active note could not be synchronized'])
+	})
+
+	it('leaves editor and disk unchanged when figure commit rejects after transforming', async () => {
+		const paths = ['assets/first.png', 'assets/second.pdf']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { app, diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'html' })
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vault.process.bind(vault)
+		let rejectNext = true
+		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
+			const result = await originalProcess(file, transform)
+			if (rejectNext) {
+				rejectNext = false
+				throw new Error(`rejected after ${result.length}`)
+			}
+			return result
+		})
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(editor.getValue()).toBe(content)
+		expect(diskContent()).toBe(content)
+		expect(noticeMessages).toEqual(['Skipped 1 attachment because the requested change could not be applied.'])
+	})
+
+	it('reports a partial figure mutation when guarded compensation cannot restore disk', async () => {
+		const paths = ['assets/first.png', 'assets/second.pdf']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { app, diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'html' })
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vault.process.bind(vault)
+		let firstProcess = true
+		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
+			if (!firstProcess) throw new Error('rollback unavailable')
+			firstProcess = false
+			const result = await originalProcess(file, transform)
+			throw new Error(`unrecoverable after ${result.length}`)
+		})
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(editor.getValue()).toBe(content)
+		expect(diskContent()).toContain('<figure')
+		expect(noticeMessages).toEqual([
+			'Changed 1 attachment, but references could not be synchronized; skipped 1 attachment because the requested change could not be applied.',
+		])
+	})
+
+	it('compensates a detached figure commit instead of reporting a false success', async () => {
+		const paths = ['assets/first.png', 'assets/second.pdf']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { app, diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'html' })
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+		const view = (app.workspace.getActiveViewOfType as () => MarkdownView)()
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vault.process.bind(vault)
+		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
+			const result = await originalProcess(file, transform)
+			if (result.includes('<figure')) view.file = createFile('notes/other.md') as unknown as TFile
+			return result
+		})
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(editor.getValue()).toBe(content)
+		expect(diskContent()).toBe(content)
+		expect(noticeMessages).toEqual(['Skipped 2 attachments because the requested changes could not be applied.'])
+	})
+
+	it.each([
+		['shortest Wikilink', 'notes/topic.md', '![[image.png]]'],
+		['relative Markdown with encoded spaces', 'notes/deep/topic.md', '![image](../../assets/photo%20space.png)'],
+		['absolute Wikilink', 'notes/topic.md', '![[/assets/image.png]]'],
+	] as const)('keeps the exact generated %s destination when cancelling a container reference', async (_label, sourcePath, generatedLink) => {
+		const filePath = generatedLink.includes('photo') ? 'assets/photo space.png' : 'assets/image.png'
+		const content = `- ${generatedLink}`
+		const generatedDestination = generatedLink.includes('photo') ? '../../assets/photo%20space.png' : generatedLink.slice(3, -2)
+		const { editor, files, plugin, sourceFile } = createBurstProductionHarness({
+			sourcePath,
+			filePaths: [filePath, 'assets/second.png'],
+			content: `${content}\n![[assets/second.png]]`,
+			imageOutput: 'html',
+			linkForPath: path => path === filePath ? generatedDestination : path,
+		})
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		const fullContent = `${content}\n![[assets/second.png]]`
+		const firstReference = {
+			link: generatedDestination, original: generatedLink,
+			position: {
+				start: { line: 0, col: 2, offset: 2 },
+				end: { line: 0, col: 2 + generatedLink.length, offset: 2 + generatedLink.length },
+			},
+		}
+		const secondReference = {
+			link: 'assets/second.png', original: '![[assets/second.png]]',
+			position: { start: { line: 1, col: 0, offset: fullContent.indexOf('![[assets/second.png]]') }, end: { line: 1, col: 22, offset: fullContent.length } },
+		}
+		plugin.metadataLedger.record(sourceFile.path, fullContent, {
+			...(generatedLink.startsWith('![[') ? { embeds: [firstReference, secondReference] } : { embeds: [secondReference], links: [firstReference] }),
+		} as never)
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(editor.getValue()).toContain(content)
+		expect(editor.getValue().match(/<figure style="text-align: center;">/g)).toHaveLength(1)
+	})
+
+	it('revalidates and renames exact non-image cache.links attachments', async () => {
+		const paths = ['assets/report.pdf', 'assets/second.png']
+		const content = `[Report](${paths[0]})\n![[${paths[1]}]]`
+		const { editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'markdown' })
+		const metadata = plugin.metadataLedger.exact(sourceFile.path, content)
+		if (metadata) {
+			const link = { link: paths[0], original: `[Report](${paths[0]})`, position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 0, col: `[Report](${paths[0]})`.length, offset: `[Report](${paths[0]})`.length } } }
+			plugin.metadataLedger.record(sourceFile.path, content, { ...metadata, links: [link] } as never)
+		}
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: `${file.basename}-renamed.${file.extension}`, isMeaningful: false }))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'rename', name: 'report-renamed.pdf', applyToRemaining: false })
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(files[0].path).toBe('assets/report-renamed.pdf')
+		expect(editor.getValue()).toContain('[Report](assets/report-renamed.pdf)')
+	})
+
 	it('resolves an eleven-item sparse exact burst before its first decision', async () => {
 		const paths = Array.from({ length: 11 }, (_, index) => `assets/item-${index}.png`)
 		const content = paths.map((path, index) => `${index === 0 ? '' : '\n'.repeat(10)}![[${path}]]`).join('')

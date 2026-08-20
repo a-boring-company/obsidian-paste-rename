@@ -237,6 +237,12 @@ describe('create burst orchestration', () => {
 			notApplied: [{ id: 'skipped-a' }, { id: 'skipped-b' }],
 			renamedButUnsynchronized: [{ id: 'renamed-a' }, { id: 'renamed-b' }],
 		})).toBe('Renamed 2 attachments, but references could not be synchronized; skipped 2 attachments because the requested changes could not be applied.')
+		expect(summarizeExactBurstOutcome({
+			applied: [],
+			notApplied: [],
+			renamedButUnsynchronized: [],
+			partiallyApplied: [{ id: 'partial-a' }, { id: 'partial-b' }],
+		})).toBe('Changed 2 attachments, but references could not be synchronized.')
 	})
 
 	it('emits one preparation failure and does not open decisions', async () => {
