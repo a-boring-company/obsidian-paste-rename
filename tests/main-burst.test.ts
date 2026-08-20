@@ -154,6 +154,7 @@ interface BurstProductionHarnessOptions {
 	filePaths: readonly string[]
 	content: string
 	diskContent?: string
+	baselineContent?: string
 	imageOutput?: 'html' | 'markdown'
 	linkForPath?: (path: string) => string
 	recordMetadataOnProcess?: boolean
@@ -228,7 +229,8 @@ function createBurstProductionHarness(options: BurstProductionHarnessOptions) {
 			editorContent = `${editorContent.slice(0, start)}${change.text}${editorContent.slice(end)}`
 		},
 	} as unknown as Editor
-	const view = { file: sourceFile, editor, data: editorInitialContent } as MarkdownView
+	const baselineContent = options.baselineContent ?? editorInitialContent
+	const view = { file: sourceFile, editor, data: baselineContent } as MarkdownView
 	const renameFile = vi.fn(async (target: TFile, newPath: string) => {
 		filesByPath.delete(target.path)
 		;(target as unknown as MockTFile).setPath(newPath)
@@ -262,7 +264,7 @@ function createBurstProductionHarness(options: BurstProductionHarnessOptions) {
 	} as PluginManifest
 	plugin = new PasteRenamePlugin(app, manifest)
 	plugin.settings = { ...DEFAULT_SETTINGS, disableRenameNotice: true, imageOutput: options.imageOutput ?? 'html' }
-	const editorSession = { filePath: sourceFile.path, editor, view, baselineContent: editorInitialContent }
+	const editorSession = { filePath: sourceFile.path, editor, view, baselineContent }
 	const seedContent = options.metadataSeedContent ?? editorInitialContent
 	recordMetadata(seedContent)
 	return {
@@ -341,7 +343,7 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 	it('renames every exact task in order when one modal choice applies to all remaining files', async () => {
 		const paths = ['assets/first.png', 'assets/second.png', 'assets/third.png']
 		const content = paths.map(path => `![[${path}]]`).join('\n')
-		const { files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'markdown' })
+		const { diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({ filePaths: paths, content, imageOutput: 'markdown' })
 		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
 			stem: file.basename,
 			newName: `${file.basename}-default.${file.extension}`,
@@ -354,9 +356,12 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		const mutations = vi.spyOn(plugin, 'renameFile').mockImplementation(async (...args) => renameImplementation(...args))
 		const mutationOrder: Array<[string, string]> = []
 		const batchMutationImplementation = plugin.renameBatchAttachmentOutcome.bind(plugin)
+		const outcomes: string[] = []
 		const batchMutations = vi.spyOn(plugin, 'renameBatchAttachmentOutcome').mockImplementation(async (...args) => {
 			mutationOrder.push([args[0].path, args[1]])
-			return batchMutationImplementation(...args)
+			const outcome = await batchMutationImplementation(...args)
+			outcomes.push(outcome)
+			return outcome
 		})
 
 		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
@@ -367,6 +372,16 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 			['assets/second.png', 'second-default.png'],
 			['assets/third.png', 'third-default.png'],
 		])
+		expect(outcomes).toEqual(['success', 'success', 'success'])
+		expect(files.map(file => file.path)).toEqual([
+			'assets/first-confirmed.png',
+			'assets/second-default.png',
+			'assets/third-default.png',
+		])
+		const expectedContent = '![[assets/first-confirmed.png]]\n![[assets/second-default.png]]\n![[assets/third-default.png]]'
+		expect(editor.getValue()).toBe(expectedContent)
+		expect(diskContent()).toBe(expectedContent)
+		expect(noticeMessages).toEqual([])
 		expect(mutations.mock.calls.map(call => call[3])).toEqual([false, false, false])
 		expect(batchMutations).toHaveBeenCalledTimes(paths.length)
 	})
@@ -425,10 +440,11 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		const paths = ['assets/first.png', 'assets/second.png']
 		const content = paths.map(path => `![[${path}]]`).join('\n')
 		const originalDisk = 'disk content before the burst'
-		const { diskContent, files, plugin, sourceFile } = createBurstProductionHarness({
+		const { app, diskContent, files, plugin, sourceFile } = createBurstProductionHarness({
 			filePaths: paths,
 			content,
 			diskContent: originalDisk,
+			baselineContent: originalDisk,
 			metadataSeedContent: originalDisk,
 			recordMetadataOnProcess: false,
 		})
@@ -439,11 +455,44 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		}))
 		const modal = vi.spyOn(plugin, 'openRenameModal')
 		const rename = vi.spyOn(plugin, 'renameBatchAttachmentOutcome')
+		const events: string[] = []
+		const vault = app.vault as unknown as {
+			process: (file: TFile, transform: (content: string) => string) => Promise<string>
+		}
+		const originalProcess = vault.process.bind(vault)
+		vi.spyOn(vault, 'process').mockImplementation(async (file, transform) => {
+			const before = diskContent()
+			const result = await originalProcess(file, transform)
+			events.push(`process:${before}->${diskContent()}`)
+			return result
+		})
+		const originalExact = plugin.metadataLedger.exact.bind(plugin.metadataLedger)
+		const exactPolls: string[] = []
+		vi.spyOn(plugin.metadataLedger, 'exact').mockImplementation((path, value) => {
+			exactPolls.push(`${path}:${value}`)
+			events.push('cache-poll')
+			return originalExact(path, value)
+		})
+		const originalNoticePush = noticeMessages.push.bind(noticeMessages)
+		vi.spyOn(noticeMessages, 'push').mockImplementation((...messages) => {
+			events.push('notice')
+			return originalNoticePush(...messages)
+		})
 
-		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
-
+		vi.stubGlobal('window', { setTimeout: (callback: () => void) => { callback(); return 0 } })
+		try {
+			await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+		} finally {
+			vi.unstubAllGlobals()
+		}
 		expect(diskContent()).toBe(originalDisk)
 		expect(files.map(file => file.path)).toEqual(paths)
+		expect(events[0]).toBe(`process:${originalDisk}->${content}`)
+		expect(events.slice(1, -2)).toEqual(Array.from({ length: 5 }, () => 'cache-poll'))
+		expect(events[events.length - 2]).toBe(`process:${content}->${originalDisk}`)
+		expect(events[events.length - 1]).toBe('notice')
+		expect(exactPolls).toHaveLength(5)
+		expect(exactPolls.every(poll => poll === `${sourceFile.path}:${content}`)).toBe(true)
 		expect(modal).not.toHaveBeenCalled()
 		expect(rename).not.toHaveBeenCalled()
 		expect(noticeMessages).toEqual(['Skipped 2 attachments because the active note could not be synchronized'])
