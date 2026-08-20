@@ -960,7 +960,6 @@ export default class PasteRenamePlugin extends Plugin {
 		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return synchronizationFailure(contentChanged)
 		const latestContent = editorSession.editor.getValue()
 		const commitState = batchCommitEditorState(capturedContent, capturedNextContent, latestContent)
-		if (commitState === 'drifted') return synchronizationFailure(contentChanged)
 		if (commitState === 'captured') {
 			if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
 		}

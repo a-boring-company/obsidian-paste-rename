@@ -720,6 +720,44 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(diskContent()).toBe(content)
 	})
 
+	it('continues an exact rename burst after a user edit lands behind a committed write', async () => {
+		const paths = ['assets/a.png', 'assets/b.png']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { app, diskContent, editor, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: paths, content, imageOutput: 'html',
+		})
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
+		let insertUserEdit = true
+		vi.spyOn(vault, 'process').mockImplementation(async (target, transform) => {
+			const result = await originalProcess(target, transform)
+			if (insertUserEdit && result.includes('assets/a-renamed.png')) {
+				insertUserEdit = false
+				const lines = editor.getValue().split('\n')
+				const end = { line: lines.length - 1, ch: lines[lines.length - 1].length }
+				editor.transaction({ changes: [{ from: end, to: end, text: '\nuser edit' }] })
+			}
+			return result
+		})
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({
+			stem: file.basename,
+			newName: `${file.basename}-renamed.${file.extension}`,
+			isMeaningful: true,
+		}))
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: true })))
+
+		const expectedContent = [
+			renderFigure({ src: 'assets/a-renamed.png', stem: 'a-renamed', width: plugin.settings.imageWidth }),
+			'',
+			renderFigure({ src: 'assets/b-renamed.png', stem: 'b-renamed', width: plugin.settings.imageWidth }),
+			'',
+			'user edit',
+		].join('\n')
+		expect(editor.getValue()).toBe(expectedContent)
+		expect(diskContent()).toBe(expectedContent)
+	})
+
 	it('rebases repeated exact occurrences while preserving container links in the live editor', async () => {
 		const paths = ['assets/a.png', 'assets/b.png']
 		const content = `![[${paths[0]}]]\n- ![[${paths[0]}]]\n![[${paths[1]}]]`
