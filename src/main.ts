@@ -453,7 +453,7 @@ export default class PasteRenamePlugin extends Plugin {
 		const result = await this.replaceAttachmentReference(file, sourcePath, originPath, cursor, generation, targetGroups, newLinkText, diskState)
 		if (!this.isCurrent(generation)) return { success: false, edit: null }
 
-		if (!this.settings.disableRenameNotice) {
+		if (notify && !this.settings.disableRenameNotice) {
 			new Notice(`Renamed ${originName} to ${newName}`)
 		}
 		return { success: true, edit: result.edit }

@@ -301,8 +301,22 @@ describe('create burst orchestration', () => {
 			choose: () => ({ action: 'cancel' as const, applyToRemaining: false }),
 			isCurrent: () => ++checks < 3,
 		})).toBeNull()
+		checks = 0
+		expect(await orchestrateCreateBurst([one], {
+			...stale(),
+			choose: () => ({ action: 'cancel' as const, applyToRemaining: false }),
+			isCurrent: () => ++checks < 4,
+		})).toBeNull()
 
 		let current = true
+		expect(await orchestrateCreateBurst([one], {
+			...stale(),
+			choose: () => ({ action: 'cancel' as const, applyToRemaining: false }),
+			applyBounded: () => { current = false },
+			isCurrent: () => current,
+		})).toBeNull()
+
+		current = true
 		expect(await orchestrateCreateBurst(exact, {
 			...stale(),
 			prepareExact: () => { current = false; return exactPreparation },
@@ -312,12 +326,77 @@ describe('create burst orchestration', () => {
 		current = true
 		expect(await orchestrateCreateBurst(exact, {
 			...stale(),
-			prepareExact: () => exactPreparation,
-			choose: () => ({ action: 'cancel' as const, applyToRemaining: true }),
-			refreshOccurrences: (_context, task) => [exactOccurrence(exactContent, task.file.path)],
-			applyExact: (_context, task) => { if (task.id === 'second') current = false; return 'success' as const },
+			prepareExact: () => {
+				current = false
+				return { context: 'exact', occurrencesByPath: new Map() }
+			},
 			isCurrent: () => current,
-		})).toEqual({ applied: exact, notApplied: [], renamedButUnsynchronized: [] })
+		})).toEqual({ applied: [], notApplied: exact, renamedButUnsynchronized: [] })
+		expect(notices).toEqual([])
+	})
+
+	it('stops an apply-to-remaining sequence when cancellation occurs during the first refresh', async () => {
+		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png'), task('third', 'assets/third.png')]
+		const content = tasks.map(current => `![[${current.file.path}]]`).join('\n')
+		let current = true
+		const refreshed: string[] = []
+		const mutated: string[] = []
+		const notices: string[] = []
+		const result = await orchestrateCreateBurst(tasks, {
+			prepareExact: () => ({
+				context: 'exact',
+				occurrencesByPath: new Map(tasks.map(currentTask => [currentTask.file.path, [exactOccurrence(content, currentTask.file.path)]])),
+			}),
+			choose: () => ({ action: 'cancel', applyToRemaining: true }),
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			refreshOccurrences: async (_context, currentTask) => {
+				refreshed.push(currentTask.id)
+				await Promise.resolve()
+				current = false
+				return [exactOccurrence(content, currentTask.file.path)]
+			},
+			applyExact: (_context, currentTask) => { mutated.push(currentTask.id); return 'success' },
+			isCurrent: () => current,
+			notify: message => { notices.push(message) },
+		})
+
+		expect(result).toEqual({ applied: [], notApplied: [], renamedButUnsynchronized: [] })
+		expect(refreshed).toEqual(['first'])
+		expect(mutated).toEqual([])
+		expect(notices).toEqual([])
+	})
+
+	it('stops an apply-to-remaining sequence when cancellation occurs during the first mutation', async () => {
+		const tasks = [task('first', 'assets/first.png'), task('second', 'assets/second.png'), task('third', 'assets/third.png')]
+		const content = tasks.map(current => `![[${current.file.path}]]`).join('\n')
+		let current = true
+		const refreshed: string[] = []
+		const mutated: string[] = []
+		const notices: string[] = []
+		const result = await orchestrateCreateBurst(tasks, {
+			prepareExact: () => ({
+				context: 'exact',
+				occurrencesByPath: new Map(tasks.map(currentTask => [currentTask.file.path, [exactOccurrence(content, currentTask.file.path)]])),
+			}),
+			choose: () => ({ action: 'cancel', applyToRemaining: true }),
+			applyBounded: () => { throw new Error('multi-file routing must not be bounded') },
+			refreshOccurrences: (_context, currentTask) => {
+				refreshed.push(currentTask.id)
+				return [exactOccurrence(content, currentTask.file.path)]
+			},
+			applyExact: async (_context, currentTask) => {
+				mutated.push(currentTask.id)
+				await Promise.resolve()
+				current = false
+				return 'success' as const
+			},
+			isCurrent: () => current,
+			notify: message => { notices.push(message) },
+		})
+
+		expect(result).toEqual({ applied: [], notApplied: [], renamedButUnsynchronized: [] })
+		expect(refreshed).toEqual(['first'])
+		expect(mutated).toEqual(['first'])
 		expect(notices).toEqual([])
 	})
 

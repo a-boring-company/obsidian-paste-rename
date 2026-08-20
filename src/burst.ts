@@ -95,17 +95,21 @@ export async function orchestrateCreateBurst<T extends OrchestratedCreateTask, C
 		const selected = applyBatchChoice(state, choice.action, choice)
 		state = selected.state
 		for (const decision of selected.decisions) {
+			if (!operations.isCurrent()) return interruptedResult
 			const task = taskById.get(decision.id) as T
 			if (!exact) {
 				await operations.applyBounded(task, decision, true)
+				if (!operations.isCurrent()) return interruptedResult
 				continue
 			}
 			const occurrences = await operations.refreshOccurrences(context as C, task)
+			if (!operations.isCurrent()) return outcome
 			if (!occurrences?.length) {
 				outcome.notApplied.push(task)
 				continue
 			}
 			const mutation = await operations.applyExact(context as C, task, occurrences, decision, false)
+			if (!operations.isCurrent()) return outcome
 			if (mutation === false || mutation === 'not-applied') outcome.notApplied.push(task)
 			else if (mutation === 'renamed-but-unsynchronized') outcome.renamedButUnsynchronized.push(task)
 			else outcome.applied.push(task)
