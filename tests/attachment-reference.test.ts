@@ -1,9 +1,99 @@
 import { describe, expect, it } from 'vitest'
 
-import { batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from '../src/attachment-reference'
+import { batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference, replaceCachedAttachmentReferences } from '../src/attachment-reference'
+import type { CachedEmbedOccurrence } from '../src/batch-occurrences'
 import { markdownDocumentContextBefore } from '../src/markdown-context'
 
 describe('attachment reference replacement', () => {
+	const occurrence = (content: string, original: string, link = 'assets/old.png'): CachedEmbedOccurrence => {
+		const start = content.indexOf(original)
+		return {
+			link,
+			original,
+			start,
+			end: start + original.length,
+			destinationStart: start + original.indexOf(link),
+			destinationEnd: start + original.indexOf(link) + link.length,
+		}
+	}
+
+	it('rejects stale cached spans instead of searching for another matching reference', () => {
+		const content = '![[assets/old.png]]\n![[assets/old.png]]'
+		const stale = { ...occurrence(content, '![[assets/old.png]]'), start: 1, end: 1 + '![[assets/old.png]]'.length }
+		expect(replaceCachedAttachmentReferences({
+			content,
+			replacement: '<figure>new</figure>', replacementPath: 'assets/new.png', image: true, asFigure: true,
+		}, [stale])).toBeNull()
+	})
+
+	it('converts multiple exact top-level references without changing unrelated duplicates', () => {
+		const content = [
+			'![[assets/old.png]]',
+			'![[assets/other.png]]',
+			'![[assets/old.png]]',
+		].join('\n')
+		const first = occurrence(content, '![[assets/old.png]]')
+		const secondStart = content.lastIndexOf('![[assets/old.png]]')
+		const second = { ...first, start: secondStart, end: secondStart + first.original.length, destinationStart: secondStart + first.destinationStart - first.start, destinationEnd: secondStart + first.destinationEnd - first.start }
+		const result = replaceCachedAttachmentReferences({
+			content,
+			replacement: '<figure>new</figure>', replacementPath: 'assets/new.png', image: true, asFigure: true,
+		}, [first, second])
+		expect(result?.text).toContain('<figure>new</figure>')
+		expect(result?.text.match(/<figure>new<\/figure>/g)).toHaveLength(2)
+		expect(result?.text).toContain('![[assets/other.png]]')
+	})
+
+	it('uses the generated destination when no explicit replacement path is supplied', () => {
+		const content = '![[assets/old.png]]'
+		const cached = occurrence(content, '![[assets/old.png]]')
+		expect(replaceCachedAttachmentReferences({
+			content, replacement: '![[assets/new.png]]', image: true, asFigure: false,
+		}, [cached])?.text).toBe('![[assets/new.png]]')
+		expect(replaceCachedAttachmentReferences({
+			content, replacement: '', image: true, asFigure: false,
+		}, [cached])?.text).toBe('![[]]')
+	})
+
+	it.each([
+		['shortest wikilink', '![[image.png]]', '![[image.png]]'],
+		['relative Markdown', '![image](../assets/image.png)', '![image](../assets/image.png)'],
+		['absolute wikilink', '![[/assets/image.png]]', '![[/assets/image.png]]'],
+	] as const)('preserves the generated %s destination', (_label, content, expected) => {
+		expect(replaceAttachmentReference({
+			content,
+			cursor: 0,
+			targetPaths: ['image.png', '../assets/image.png', '/assets/image.png'],
+			replacement: expected,
+			replacementPath: expected.includes('(') ? '../assets/image.png' : expected.slice(expected.indexOf('[[') + 2, expected.indexOf(']]')),
+			image: true,
+			asFigure: false,
+		})?.text).toBe(expected)
+	})
+
+	it('recognizes an exact no-op and rejects overlapping cached provenance', () => {
+		const content = '![[assets/old.png]]'
+		const cached = occurrence(content, '![[assets/old.png]]')
+		expect(replaceCachedAttachmentReferences({
+			content, replacement: '![[assets/old.png]]', replacementPath: 'assets/old.png', image: true, asFigure: false,
+		}, [cached])).toMatchObject({ text: content, matched: true })
+		expect(replaceCachedAttachmentReferences({
+			content, replacement: '![[assets/new.png]]', replacementPath: 'assets/new.png', image: true, asFigure: false,
+		}, [cached, cached])).toBeNull()
+	})
+
+	it('rejects malformed, offset-stale, and non-image cached references', () => {
+		expect(replaceCachedAttachmentReferences({ content: 'plain text', replacement: 'new', image: true, asFigure: false }, [{
+			link: 'plain text', original: 'plain text', start: 0, end: 10, destinationStart: 0, destinationEnd: 10,
+		}])).toBeNull()
+		const content = '![[assets/old.png]]'
+		const cached = occurrence(content, '![[assets/old.png]]')
+		expect(replaceCachedAttachmentReferences({ content, replacement: 'new', image: true, asFigure: false }, [{
+			...cached, destinationStart: cached.destinationStart + 1,
+		}])).toBeNull()
+		const nonImage = occurrence('[[assets/old.png]]', '[[assets/old.png]]')
+		expect(replaceCachedAttachmentReferences({ content: '[[assets/old.png]]', replacement: 'new', image: true, asFigure: false }, [nonImage])).toBeNull()
+	})
 	it('classifies the anchored reference as old, current, or absent', () => {
 		expect(classifyAttachmentReference({
 			content: '![[old.png]]', cursor: 5, targetPaths: ['old.png'], currentTargetPaths: ['new.png'], image: true,

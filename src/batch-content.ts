@@ -1,6 +1,88 @@
-import type { CachedMetadata } from 'obsidian'
+import type { CachedMetadata, TFile, Vault } from 'obsidian'
+import { replaceCachedAttachmentReferences } from './attachment-reference'
 import { CachedEmbedOccurrence, replaceRetargetedCachedOccurrences } from './batch-occurrences'
 import { replaceGeneratedFigures } from './figure-document'
+import { retryBounded } from './retry'
+
+export type ExactSourcePreflightFailure = 'synchronize' | 'rollback' | 'cancelled'
+
+export interface ExactSourcePreflightResult<T> {
+	value: T | null
+	failure: ExactSourcePreflightFailure | null
+}
+
+interface ExactSourcePreflightOptions<T> {
+	snapshot: string
+	disk: string
+	isCurrent: () => boolean
+	isSnapshotCurrent?: () => boolean
+	writeSnapshot: (recordSource: (content: string) => void) => Promise<'written' | 'conflict' | 'cancelled'>
+	readExactCache: () => T | null | Promise<T | null>
+	readDisk: () => Promise<string>
+	rollbackSnapshot: (sourceContent: string) => Promise<boolean>
+	advanceBaseline: () => boolean
+	retries?: number
+	wait?: () => Promise<void>
+}
+
+export async function prepareExactSourceSnapshot<T>(options: ExactSourcePreflightOptions<T>): Promise<ExactSourcePreflightResult<T>> {
+	let snapshotWriteSource: string | null = null
+	const isSnapshotCurrent = options.isSnapshotCurrent ?? (() => true)
+	const fail = async (failure: ExactSourcePreflightFailure): Promise<ExactSourcePreflightResult<T>> => {
+		if (snapshotWriteSource === null || snapshotWriteSource === options.snapshot) return { value: null, failure }
+		let restored = false
+		try {
+			restored = await options.rollbackSnapshot(snapshotWriteSource)
+		} catch {
+			// Keep the default rollback failure result.
+		}
+		return { value: null, failure: restored ? failure : 'rollback' }
+	}
+
+	try {
+		if (!options.isCurrent() || !isSnapshotCurrent()) return fail('cancelled')
+		if (options.snapshot !== options.disk) {
+			let writeResult: 'written' | 'conflict' | 'cancelled'
+			try {
+				writeResult = await options.writeSnapshot(content => { snapshotWriteSource = content })
+			} catch {
+				let persisted: string
+				try {
+					persisted = await options.readDisk()
+				} catch {
+					return { value: null, failure: 'rollback' }
+				}
+				if (persisted === options.snapshot) {
+					return fail('synchronize')
+				}
+				if (persisted === snapshotWriteSource || persisted === options.disk) return { value: null, failure: 'synchronize' }
+				return { value: null, failure: 'rollback' }
+			}
+			if (writeResult !== 'written') return { value: null, failure: writeResult === 'cancelled' ? 'cancelled' : 'synchronize' }
+			if (!options.isCurrent() || !isSnapshotCurrent()) return fail('cancelled')
+		}
+		const attempts = Math.max(1, options.retries ?? 1)
+		const cached = await retryBounded(attempts, async attempt => {
+			if (!options.isCurrent() || !isSnapshotCurrent()) return null
+			try {
+				const cache = await options.readExactCache()
+				if (!options.isCurrent() || !isSnapshotCurrent()) return null
+				const disk = await options.readDisk()
+				if (!options.isCurrent() || !isSnapshotCurrent()) return null
+				if (cache !== null && disk === options.snapshot) return cache
+			} catch {
+				// Keep polling until the exact cache and disk content agree.
+			}
+			if (attempt + 1 < attempts && options.wait) await options.wait()
+			return null
+		}, () => !options.isCurrent() || !isSnapshotCurrent())
+		if (cached === null) return fail(options.isCurrent() && isSnapshotCurrent() ? 'synchronize' : 'cancelled')
+		if (!options.isCurrent() || !isSnapshotCurrent() || !options.advanceBaseline() || !isSnapshotCurrent()) return fail('cancelled')
+		return { value: cached, failure: null }
+	} catch {
+		return fail('synchronize')
+	}
+}
 
 interface BatchMetadataLedgerEntry {
 	fingerprint: string
@@ -193,24 +275,39 @@ export function fullDocumentChange(current: string, next: string): DocumentTextC
 	}
 }
 
-export function liveBatchAttachmentChange(
+export async function rollbackBatchSourceWrite(
+	vault: Pick<Vault, 'process' | 'read'>,
+	file: TFile,
+	writtenContent: string,
+	originalContent: string,
+): Promise<boolean> {
+	let restored = false
+	try {
+		await vault.process(file, content => {
+			if (content !== writtenContent) return content
+			restored = true
+			return originalContent
+		})
+		if (!restored) return false
+		return await vault.read(file) === originalContent
+	} catch {
+		return false
+	}
+}
+
+export function replaceBatchFigureContent(
 	content: string,
-	oldFigurePath: string,
-	newFigurePath: string,
-	oldStem: string,
-	newStem: string,
-	occurrences: readonly CachedEmbedOccurrence[] = [],
-	currentOccurrences: readonly CachedEmbedOccurrence[] = [],
-): DocumentTextChange | null {
-	return fullDocumentChange(content, replaceBatchAttachmentContent(
+	replacement: string,
+	replacementPath: string,
+	occurrences: readonly CachedEmbedOccurrence[],
+): string | null {
+	return replaceCachedAttachmentReferences({
 		content,
-		oldFigurePath,
-		newFigurePath,
-		oldStem,
-		newStem,
-		occurrences,
-		currentOccurrences,
-	))
+		replacement,
+		replacementPath,
+		image: true,
+		asFigure: true,
+	}, occurrences)?.text ?? null
 }
 
 export function replaceBatchAttachmentContent(
@@ -221,7 +318,11 @@ export function replaceBatchAttachmentContent(
 	newStem: string,
 	occurrences: readonly CachedEmbedOccurrence[] = [],
 	currentOccurrences: readonly CachedEmbedOccurrence[] = [],
-): string {
+	figureReplacement?: string,
+): string | null {
 	const withUpdatedReferences = replaceRetargetedCachedOccurrences(content, occurrences, currentOccurrences)
-	return replaceGeneratedFigures(withUpdatedReferences, oldFigurePath, newFigurePath, oldStem, newStem)
+	const converted = figureReplacement
+		? replaceBatchFigureContent(withUpdatedReferences, figureReplacement, newFigurePath, currentOccurrences)
+		: withUpdatedReferences
+	return converted === null ? null : replaceGeneratedFigures(converted, oldFigurePath, newFigurePath, oldStem, newStem)
 }

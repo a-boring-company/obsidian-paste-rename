@@ -1,5 +1,4 @@
-import { pathsEqual } from './embeds'
-import { escapeHtml, renderFigure } from './figure'
+import { renderFigure } from './figure'
 import { advanceMarkdownDocumentContext, emptyMarkdownDocumentContext } from './markdown-context'
 
 function decodeHtmlAttribute(value: string): string {
@@ -71,35 +70,14 @@ function stemFromPath(path: string): string {
 	return extensionStart > 0 ? basename.slice(0, extensionStart) : basename
 }
 
-function legacyEncodePath(path: string): string {
-	return path.split('/').map(segment => {
-		if (segment === '.' || segment === '..' || segment === '') return segment
-		try {
-			return encodeURIComponent(decodeURIComponent(segment))
-		} catch {
-			return encodeURIComponent(segment)
-		}
-	}).join('/')
-}
-
-function renderFigureWithSource(source: string, stem: string, width: number): string {
-	const caption = stem.replace(/_/g, ' ')
-	return `<figure style="text-align: center;">\n<img src="${escapeHtml(source)}" alt="${escapeHtml(stem)}" style="width: ${width}%;">\n<figcaption><b>Figure</b>. ${escapeHtml(caption)}.</figcaption>\n</figure>`
-}
-
 function isOwnedGeneratedFigure(block: GeneratedFigureBlock, expectedPath?: string, expectedStem?: string): boolean {
 	const decodedPath = decodeGeneratedFigureSource(block.source)
-	if (!decodedPath || decodedPath.endsWith('/') || (expectedPath !== undefined && !pathsEqual(decodedPath, expectedPath))) return false
+	if (!decodedPath || decodedPath.endsWith('/') || (expectedPath !== undefined && decodedPath !== expectedPath)) return false
 	const stem = stemFromPath(decodedPath)
 	if (expectedStem !== undefined && stem !== expectedStem) return false
 	if (decodeHtmlAttribute(block.alt) !== stem || decodeHtmlAttribute(block.caption) !== stem.replace(/_/g, ' ')) return false
 	const lineEnding = block.text.includes('\r\n') ? '\r\n' : '\n'
-	const candidates = [
-		renderFigure({ src: decodedPath, stem, width: block.width }),
-		renderFigureWithSource(legacyEncodePath(decodedPath), stem, block.width),
-		renderFigureWithSource(decodedPath, stem, block.width),
-	].map(candidate => candidate.replace(/\n/g, lineEnding))
-	return candidates.some(candidate => candidate === block.text)
+	return renderFigure({ src: decodedPath, stem, width: block.width }).replace(/\n/g, lineEnding) === block.text
 }
 
 function generatedFigures(value: string): GeneratedFigureBlock[] {

@@ -10,6 +10,7 @@ describe('CommonMark attachment reference parsing', () => {
 		expect(extractReferencePath('![a\\]lt](folder/my\\(image\\).png)')).toMatchObject({ path: 'folder/my\\(image\\).png' })
 		expect(extractReferencePath('![alt](<folder/my\\>image.png>)')).toMatchObject({ path: 'folder/my\\>image.png' })
 		expect(extractReferencePath('![alt](folder/image_(1).png)')).toMatchObject({ path: 'folder/image_(1).png' })
+		expect(extractReferencePath('![outer [inner] alt](folder/image.png)')).toMatchObject({ path: 'folder/image.png' })
 		expect(extractReferencePath('![alt](folder/file\\name.png)')).toMatchObject({ path: 'folder/file\\name.png' })
 		expect(pathsEqual('folder/my\\(image\\).png', 'folder/my(image).png')).toBe(true)
 		expect(pathsEqual('bad%name.png', 'bad%name.png')).toBe(true)

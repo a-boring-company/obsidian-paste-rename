@@ -15,12 +15,11 @@ import {
 import type { CachedMetadata } from 'obsidian'
 
 import { ImageBatchRenameModal } from './batch';
-import { applyBatchChoice, createBatchChoiceState } from './batch-state';
-import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, hasBatchEditorOwnership, liveBatchAttachmentChange, replaceBatchAttachmentContent } from './batch-content';
+import { BatchEditorSession, advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fullDocumentChange, hasBatchEditorOwnership, prepareExactSourceSnapshot, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from './batch-content';
 import { attachmentTargetPathGroups, extractGeneratedDestination } from './attachment-links';
 import { relativeAttachmentPath, renameInPlace } from './attachment-path';
 import { AttachmentReferenceState, batchNativeLinkSyncDecision, classifyAttachmentReference, nativeLinkSyncDecision, replaceAttachmentReference } from './attachment-reference';
-import { CachedAttachmentGroup, CachedEmbedOccurrence, attachmentTargetDiscovered, cacheEmbedOccurrences, cacheReferenceOccurrences, deriveRetargetDestinations, groupCachedAttachments, retargetCachedOccurrences } from './batch-occurrences';
+import { CachedAttachmentGroup, CachedEmbedOccurrence, attachmentTargetDiscovered, cacheEmbedOccurrences, cacheReferenceOccurrences, deriveRetargetDestinations, groupCachedAttachments, mapCachedOccurrencesByTargetPath, retargetCachedOccurrences } from './batch-occurrences';
 import { AttachmentTypeUserSource, chooseAttachmentTypeConfig } from './attachment-type-files';
 import { applyAttachmentTypeSnapshot, commitAttachmentTypeSnapshot, createAttachmentTypePersistence, reconcileAttachmentTypeFailure } from './attachment-type-state';
 import {
@@ -32,9 +31,10 @@ import {
 	parseAttachmentTypeConfig,
 	parseAttachmentTypeTextarea,
 } from './attachment-types';
-import { cancelBurst, createBurstCancellation, isBurstCancelled } from './burst';
+import { cancelBurst, createBurstCancellation, CreateBurstDecision, ExactBurstMutationStatus, ExactBurstPreparation, isBurstCancelled, orchestrateCreateBurst, summarizeExactSourcePreparationFailure } from './burst';
 import { isEligibleAttachmentCreate } from './create-eligibility';
-import { BOUNDED_SEARCH_RADIUS, LineEdit, mapCursorAfterLineEdit, replaceNearCursorInText } from './embed-location';
+import { BOUNDED_SEARCH_RADIUS, LineEdit, replaceNearCursorInText } from './embed-location';
+import { extractReferencePath } from './embeds';
 import { renderFigure } from './figure';
 import { normalizeFilenameStem } from './filename';
 import { markdownDocumentContextBefore } from './markdown-context';
@@ -125,6 +125,18 @@ interface BatchSourceSnapshot {
 	content: string
 	embeds: CachedEmbedOccurrence[]
 	references: CachedEmbedOccurrence[]
+}
+
+type BatchSourcePreparationFailure = 'capture' | 'read' | 'synchronize' | 'rollback' | 'cancelled'
+
+interface BatchSourcePreparationResult {
+	snapshot: BatchSourceSnapshot | null
+	failure: BatchSourcePreparationFailure | null
+}
+
+interface ExactRenameBurstContext {
+	sourceFile: TFile
+	editorSession: BatchEditorSession<Editor, MarkdownView>
 }
 
 
@@ -241,8 +253,13 @@ export default class PasteRenamePlugin extends Plugin {
 	async processPendingBurst() {
 		if (this.processingBurst || !this.pendingRenameRequests.length || this.cancellation.cancelled) return
 		this.processingBurst = true
-		const requests = this.pendingRenameRequests.splice(0)
-		const generation = requests[0]?.generation ?? this.cancellation.generation
+		const firstRequest = this.pendingRenameRequests[0]
+		const sharesBurstSource = (request: RenameRequest) => request.generation === firstRequest.generation
+			&& request.sourcePath === firstRequest.sourcePath
+			&& request.sourceFile.path === firstRequest.sourceFile.path
+		const nextSource = this.pendingRenameRequests.findIndex(request => !sharesBurstSource(request))
+		const requests = this.pendingRenameRequests.splice(0, nextSource < 0 ? this.pendingRenameRequests.length : nextSource)
+		const generation = firstRequest.generation
 		try {
 			await this.processRenameBurst(requests, generation)
 		} finally {
@@ -262,50 +279,152 @@ export default class PasteRenamePlugin extends Plugin {
 			const generated = this.generateNewName(request.file, request.sourceFile)
 			return { ...request, id: `${index}`, proposedName: generated.newName, stem: generated.stem, isMeaningful: generated.isMeaningful }
 		})
-		let state = createBatchChoiceState(tasks.map(task => ({ id: task.id, proposedName: task.proposedName })))
-		const taskById = new Map(tasks.map(task => [task.id, task]))
-		while (state.remaining.length) {
-			if (!this.isCurrent(generation)) return
-			const current = taskById.get(state.remaining[0].id)
-			if (!current) break
-			if (current.autoRename && current.isMeaningful) {
-				const result = applyBatchChoice(state, 'rename', { name: current.proposedName })
-				await this.applyRenameDecisions(result.decisions, taskById, generation)
-				state = result.state
-				continue
-			}
-			const choice = await this.openRenameModal(current, state.remaining.length > 1, generation)
-			if (!this.isCurrent(generation)) return
-			const result = applyBatchChoice(state, choice.action, {
-				name: choice.name,
-				applyToRemaining: choice.applyToRemaining,
-			})
-			await this.applyRenameDecisions(result.decisions, taskById, generation)
-			state = result.state
+		await orchestrateCreateBurst(tasks, {
+			prepareExact: () => this.prepareExactRenameBurst(tasks, generation),
+			choose: (task, hasRemaining) => this.openRenameModal(task, hasRemaining, generation),
+			applyBounded: (task, decision, notify) => this.applyRenameDecision(task, decision, generation, notify),
+			applyExact: async (context, task, decision, notify) => {
+				if (decision.action === 'rename') return this.renameBatchAttachmentOutcome(
+					task.file,
+					decision.name,
+					context.sourceFile,
+					context.editorSession,
+					generation,
+					notify,
+					true,
+				)
+				if (this.settings.imageOutput !== 'html' || !isImageExtension(task.file.extension, this.attachmentTypes)) return true
+				const prepared = await this.prepareBatchSourceExact(context.sourceFile, context.editorSession, generation)
+				if (!prepared.snapshot || !this.isCurrent(generation)) return 'not-applied'
+				const occurrences = mapCachedOccurrencesByTargetPath(
+					prepared.snapshot.references,
+					[task.file.path],
+					link => this.app.metadataCache.getFirstLinkpathDest(link, context.sourceFile.path),
+				).get(task.file.path)
+				if (!occurrences?.length || !this.isCurrent(generation)) return 'not-applied'
+				const imageOccurrences = occurrences.filter(occurrence => extractReferencePath(occurrence.original)?.image === true)
+				if (!imageOccurrences.length) return true
+				return this.convertBatchAttachmentToFigure({ ...task, occurrences: imageOccurrences }, context.sourceFile, context.editorSession, generation)
+			},
+			isCurrent: () => this.isCurrent(generation),
+			notify: message => { new Notice(message) },
+		})
+	}
+
+	async prepareExactRenameBurst(tasks: RenameTask[], generation: number): Promise<ExactBurstPreparation<ExactRenameBurstContext>> {
+		const sourcePath = tasks[0]?.sourcePath
+		if (!sourcePath || tasks.some(task => task.sourcePath !== sourcePath || task.sourceFile.path !== sourcePath)) {
+			return { failure: `Skipped ${tasks.length} attachments because their active note changed` }
+		}
+		const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath)
+		if (!(sourceFile instanceof TFile)) {
+			return { failure: `Skipped ${tasks.length} attachments because the active note is unavailable` }
+		}
+		const editorSession = this.getBatchEditorSession(sourceFile)
+		if (!editorSession) {
+			return { failure: `Skipped ${tasks.length} attachments because the active note editor is unavailable` }
+		}
+		const prepared = await this.prepareBatchSourceExact(sourceFile, editorSession, generation)
+		if (!prepared.snapshot || !this.isCurrent(generation)) {
+			return { failure: summarizeExactSourcePreparationFailure(tasks.length, prepared.failure ?? 'synchronize') }
+		}
+		return {
+			context: { sourceFile, editorSession },
+			occurrencesByPath: mapCachedOccurrencesByTargetPath(
+				prepared.snapshot.references,
+				tasks.map(task => task.file.path),
+				link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+			),
 		}
 	}
 
-	async applyRenameDecisions(
-		decisions: Array<{ id: string; action: 'rename' | 'cancel'; name: string }>,
-		taskById: Map<string, RenameTask>,
+	async convertBatchAttachmentToFigure(
+		task: RenameTask & { occurrences: readonly CachedEmbedOccurrence[] },
+		sourceFile: TFile,
+		editorSession: BatchEditorSession<Editor, MarkdownView>,
+		generation: number,
+	): Promise<boolean | ExactBurstMutationStatus> {
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
+		const capturedContent = editorSession.editor.getValue()
+		const replacement = renderFigure({ src: task.file.path, stem: task.file.basename, width: this.settings.imageWidth })
+		const nextContent = replaceBatchFigureContent(capturedContent, replacement, task.file.path, task.occurrences)
+		if (nextContent === null) return false
+		const change = fullDocumentChange(capturedContent, nextContent)
+		if (!change) return true
+		const editorStillCaptured = () => this.isCurrent(generation)
+			&& this.isBatchEditorSessionBound(editorSession, sourceFile)
+			&& editorSession.editor.getValue() === capturedContent
+		let transformedDiskContent: string | null = null
+		const compensate = async (): Promise<boolean> => {
+			if (transformedDiskContent === null || transformedDiskContent === nextContent) return true
+			if (await rollbackBatchSourceWrite(this.app.vault, sourceFile, nextContent, transformedDiskContent)) return true
+			try { return await this.app.vault.read(sourceFile) === transformedDiskContent } catch { return false }
+		}
+		const revertEditorIfCommitted = (): boolean => {
+			if (editorSession.editor.getValue() !== nextContent) return true
+			const revert = fullDocumentChange(nextContent, capturedContent)
+			if (!revert) return true
+			try {
+				editorSession.editor.transaction({ changes: [revert] })
+				return editorSession.editor.getValue() === capturedContent
+			} catch { return false }
+		}
+		const restoreMutation = async () => revertEditorIfCommitted() && await compensate()
+		let writeResult: 'written' | 'conflict' | 'cancelled'
+		try {
+			writeResult = await compareAndWriteVaultText(
+				this.app.vault,
+				sourceFile,
+				content => {
+					transformedDiskContent = content
+					return content === editorSession.baselineContent || content === capturedContent
+				},
+				editorStillCaptured,
+				nextContent,
+			)
+		} catch (error) {
+			const restored = await restoreMutation()
+			if (this.isCurrent(generation)) {
+				console.error('Could not save synchronized attachment figures', error)
+			}
+			return restored ? false : 'partially-applied'
+		}
+		if (writeResult !== 'written') {
+			return false
+		}
+		if (!editorStillCaptured()) {
+			return await restoreMutation() ? false : 'partially-applied'
+		}
+		try {
+			editorSession.editor.transaction({ changes: [change] })
+		} catch (error) {
+			const restored = await restoreMutation()
+			if (this.isCurrent(generation)) console.error('Could not reconcile synchronized attachment figures', error)
+			return restored ? false : 'partially-applied'
+		}
+		if (!this.isCurrent(generation)
+			|| !this.isBatchEditorSessionBound(editorSession, sourceFile)
+			|| editorSession.editor.getValue() !== nextContent) {
+			return await restoreMutation() ? false : 'partially-applied'
+		}
+		if (!advanceBatchEditorBaseline(editorSession, sourceFile.path, nextContent, editorSession.view.file?.path, editorSession.view.editor)) {
+			return await restoreMutation() ? false : 'partially-applied'
+		}
+		return true
+	}
+
+	async applyRenameDecision(
+		task: RenameTask,
+		decision: CreateBurstDecision,
 		generation = this.cancellation.generation,
+		notify = true,
 	) {
-		for (const decision of decisions) {
-			if (!this.isCurrent(generation)) return
-			const task = taskById.get(decision.id)
-			if (!task) continue
-			if (decision.action === 'rename') {
-				const result = await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation)
-				if (result.success && result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
-			} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
-				const result = await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
-				if (result.edit && this.isCurrent(generation)) this.updateTaskCursors(taskById, result.edit)
-			}
+		if (!this.isCurrent(generation)) return
+		if (decision.action === 'rename') {
+			await this.renameFile(task.file, decision.name, task.sourcePath, true, task.cursor, generation, notify)
+		} else if (this.settings.imageOutput === 'html' && isImageExtension(task.file.extension, this.attachmentTypes)) {
+			await this.replaceAttachmentReference(task.file, task.sourcePath, task.file.path, task.cursor, generation)
 		}
-	}
-
-	updateTaskCursors(taskById: Map<string, RenameTask>, edit: LineEdit) {
-		for (const task of taskById.values()) task.cursor = mapCursorAfterLineEdit(task.cursor, edit)
 	}
 
 	async renameFile(
@@ -315,13 +434,14 @@ export default class PasteRenamePlugin extends Plugin {
 		replaceCurrentLine = false,
 		capturedCursor?: EditorPosition,
 		generation = this.cancellation.generation,
+		notify = true,
 	): Promise<RenameFileResult> {
 		const originPath = file.path
 		const suffix = file.extension ? `.${file.extension}` : ''
 		const rawStem = suffix && inputNewName.endsWith(suffix) ? inputNewName.slice(0, -suffix.length) : inputNewName
 		const normalizedStem = normalizeFilenameStem(rawStem)
 		if (!normalizedStem) {
-			if (this.isCurrent(generation)) new Notice('Failed to rename attachment: new name is empty')
+			if (notify && this.isCurrent(generation)) new Notice('Failed to rename attachment: new name is empty')
 			return { success: false, edit: null }
 		}
 		const normalizedName = suffix ? `${normalizedStem}${suffix}` : normalizedStem
@@ -339,7 +459,7 @@ export default class PasteRenamePlugin extends Plugin {
 				if (!this.isCurrent(generation)) return { success: false, edit: null }
 				await this.app.fileManager.renameFile(file, newPath)
 			} catch (err) {
-				if (this.isCurrent(generation)) new Notice(`Failed to rename ${newName}: ${err}`)
+				if (notify && this.isCurrent(generation)) new Notice(`Failed to rename ${newName}: ${err}`)
 				return { success: false, edit: null }
 			}
 		}
@@ -367,7 +487,7 @@ export default class PasteRenamePlugin extends Plugin {
 		const result = await this.replaceAttachmentReference(file, sourcePath, originPath, cursor, generation, targetGroups, newLinkText, diskState)
 		if (!this.isCurrent(generation)) return { success: false, edit: null }
 
-		if (!this.settings.disableRenameNotice) {
+		if (notify && !this.settings.disableRenameNotice) {
 			new Notice(`Renamed ${originName} to ${newName}`)
 		}
 		return { success: true, edit: result.edit }
@@ -436,14 +556,14 @@ export default class PasteRenamePlugin extends Plugin {
 		nativeLinkSyncState: AttachmentReferenceState | null = 'old',
 	): Promise<ReferenceReplacement> {
 		if (!this.isCurrent(generation)) return { matched: false, edit: null }
-		const currentPath = relativeAttachmentPath(sourcePath, file.path)
+		const canonicalPath = file.path
 		const targetPaths = targetGroups.old
 		const image = isImageExtension(file.extension, this.attachmentTypes)
 		const asFigure = image && this.settings.imageOutput === 'html'
 		const desiredLinkText = image && !newLinkText.startsWith('!') ? `!${newLinkText}` : newLinkText
-		const replacementPath = extractGeneratedDestination(newLinkText) ?? currentPath
+		const replacementPath = extractGeneratedDestination(newLinkText) ?? canonicalPath
 		const replacement = asFigure
-			? renderFigure({ src: currentPath, stem: file.basename, width: this.settings.imageWidth })
+			? renderFigure({ src: canonicalPath, stem: file.basename, width: this.settings.imageWidth })
 			: desiredLinkText
 		const figureImageLine = asFigure ? replacement.split('\n')[1] : ''
 		const result = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
@@ -596,84 +716,69 @@ export default class PasteRenamePlugin extends Plugin {
 		sourceFile: TFile,
 		session: BatchEditorSession<Editor, MarkdownView>,
 		generation: number,
+		notify = true,
 	): Promise<BatchSourceSnapshot | null> {
-		if (!this.isBatchEditorSessionBound(session, sourceFile) || !this.isCurrent(generation)) {
-			if (this.isCurrent(generation)) new Notice('Could not capture the active note editor')
-			return null
-		}
+		const prepared = await this.prepareBatchSourceExact(sourceFile, session, generation)
+		if (prepared.snapshot || !this.isCurrent(generation)) return prepared.snapshot
+		if (notify && prepared.failure === 'capture') new Notice('Could not capture the active note editor')
+		else if (notify && prepared.failure === 'read') new Notice('Could not read the active note before batch rename')
+		else if (notify && (prepared.failure === 'synchronize' || prepared.failure === 'rollback')) new Notice('Could not synchronize the active note before batch rename')
+		return null
+	}
+
+	async prepareBatchSourceExact(
+		sourceFile: TFile,
+		session: BatchEditorSession<Editor, MarkdownView>,
+		generation: number,
+	): Promise<BatchSourcePreparationResult> {
+		if (!this.isBatchEditorSessionBound(session, sourceFile)) return { snapshot: null, failure: 'capture' }
+		if (!this.isCurrent(generation)) return { snapshot: null, failure: 'cancelled' }
 		const snapshot = session.editor.getValue()
 		const baselineContent = session.baselineContent
 		let disk: string
 		try {
 			disk = await this.app.vault.read(sourceFile)
 		} catch (error) {
-			if (this.isCurrent(generation)) {
-				console.error('Could not read active note before batch rename', error)
-				new Notice('Could not read the active note before batch rename')
-			}
-			return null
+			console.error('Could not read active note before batch rename', error)
+			return { snapshot: null, failure: 'read' }
 		}
-		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
+		const isSnapshotCurrent = () => this.isCurrent(generation)
+			&& this.isBatchEditorSessionBound(session, sourceFile)
+			&& session.editor.getValue() === snapshot
+		if (!isSnapshotCurrent()) return { snapshot: null, failure: 'cancelled' }
 		const snapshotFromCache = (cache: CachedMetadata): BatchSourceSnapshot => {
 			const embeds = cacheEmbedOccurrences(snapshot, cache.embeds ?? [])
 			const references = cacheReferenceOccurrences(snapshot, [...(cache.embeds ?? []), ...(cache.links ?? [])])
 			return { content: snapshot, embeds, references }
 		}
-		try {
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
-			if (snapshot === disk) {
-				const cached = this.metadataLedger.exact(sourceFile.path, snapshot)
-				if (cached) {
-					if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return null
-					return snapshotFromCache(cached)
-				}
-			} else {
-				const writeResult = await compareAndWriteVaultText(
-					this.app.vault,
-					sourceFile,
-					content => content === baselineContent || content === snapshot,
-					() => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
-					snapshot,
-				)
-				if (writeResult !== 'written') {
-					if (this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
-					return null
-				}
-				if (!advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)) return null
-				if (!this.isCurrent(generation)) return null
-			}
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
-			const synced = await retryBounded(FIGURE_RETRY_COUNT, async attempt => {
-				if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
-				const cache = this.metadataLedger.exact(sourceFile.path, snapshot)
-				if (cache) {
-					try {
-						if (await this.app.vault.read(sourceFile) !== snapshot) {
-							if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
-							return null
-						}
-					} catch {
-						return null
-					}
-					return cache
-				}
-				if (attempt + 1 < FIGURE_RETRY_COUNT) await new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS))
-				return null
-			}, () => !this.isCurrent(generation))
-			if (!synced) {
-				if (this.isCurrent(generation)) new Notice('Could not synchronize the active note before batch rename')
-				return null
-			}
-			if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(session, sourceFile)) return null
-			advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor)
-			return snapshotFromCache(synced)
-		} catch (error) {
-			if (this.isCurrent(generation)) {
-				console.error('Could not synchronize active note before batch rename', error)
-				new Notice('Could not synchronize the active note before batch rename')
-			}
-			return null
+		const prepared = await prepareExactSourceSnapshot({
+			snapshot,
+			disk,
+			isCurrent: () => this.isCurrent(generation) && this.isBatchEditorSessionBound(session, sourceFile),
+			isSnapshotCurrent,
+			writeSnapshot: recordSource => compareAndWriteVaultText(
+				this.app.vault,
+				sourceFile,
+				content => {
+					recordSource(content)
+					return content === baselineContent || content === snapshot
+				},
+				isSnapshotCurrent,
+				snapshot,
+			),
+			readExactCache: () => this.metadataLedger.exact(sourceFile.path, snapshot),
+			readDisk: () => this.app.vault.read(sourceFile),
+			rollbackSnapshot: sourceContent => rollbackBatchSourceWrite(this.app.vault, sourceFile, snapshot, sourceContent),
+			advanceBaseline: () => isSnapshotCurrent()
+				&& advanceBatchEditorBaseline(session, sourceFile.path, snapshot, session.view.file?.path, session.view.editor),
+			retries: FIGURE_RETRY_COUNT,
+			wait: () => new Promise(resolve => window.setTimeout(resolve, FIGURE_RETRY_DELAY_MS)),
+		})
+		if (!prepared.value) {
+			if (prepared.failure === 'synchronize') console.error('Could not synchronize active note before batch rename')
+			return { snapshot: null, failure: prepared.failure }
 		}
+		return { snapshot: snapshotFromCache(prepared.value), failure: null }
 	}
 
 	async scanBatchAttachments(
@@ -690,10 +795,184 @@ export default class PasteRenamePlugin extends Plugin {
 		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
 		const grouped = new Map(groups.map(group => [group.file.path, group]))
 		for (const link of extractGeneratedFigurePaths(prepared.content)) {
-			const file = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
-			if (file && isEligibleAttachmentExtension(file.extension, this.attachmentTypes) && !grouped.has(file.path)) grouped.set(file.path, { file })
+			const file = this.getExactVaultFile(link)
+			if (file && file.path === link && isEligibleAttachmentExtension(file.extension, this.attachmentTypes) && !grouped.has(file.path)) grouped.set(file.path, { file })
 		}
 		return [...grouped.values()]
+	}
+
+	async renameBatchAttachmentOutcome(
+		file: TFile,
+		newName: string,
+		sourceFile: TFile,
+		editorSession: BatchEditorSession<Editor, MarkdownView>,
+		generation = this.cancellation.generation,
+		notify = true,
+		exactReferences = false,
+	): Promise<ExactBurstMutationStatus> {
+		const prepared = await this.prepareBatchSource(sourceFile, editorSession, generation, notify)
+		if (!prepared || !this.isCurrent(generation)) return 'not-applied'
+		const freshGroups = groupCachedAttachments<TFile>(
+			prepared.content,
+			exactReferences ? prepared.references : prepared.embeds,
+			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
+		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
+		const generatedPaths = extractGeneratedFigurePaths(prepared.content).filter(link => {
+			const generatedFile = this.getExactVaultFile(link)
+			return generatedFile !== null && generatedFile.path === link && isEligibleAttachmentExtension(generatedFile.extension, this.attachmentTypes)
+		})
+		if (!attachmentTargetDiscovered(
+			freshGroups,
+			generatedPaths,
+			file.path,
+			link => this.getExactVaultFile(link),
+		)) {
+			if (notify && this.isCurrent(generation)) new Notice(`Could not revalidate ${file.name} in the active note`)
+			return 'not-applied'
+		}
+		const oldOccurrences = prepared.references.filter(occurrence =>
+			this.app.metadataCache.getFirstLinkpathDest(occurrence.link, sourceFile.path)?.path === file.path)
+		const oldPath = file.path
+		const oldStem = file.basename
+		const renameResult = await this.renameFile(file, newName, sourceFile.path, false, undefined, generation, notify)
+		if (!renameResult.success) return file.path === oldPath ? 'not-applied' : 'renamed-but-unsynchronized'
+		if (!this.isCurrent(generation)) return 'renamed-but-unsynchronized'
+		const figureReplacement = exactReferences
+			&& this.settings.imageOutput === 'html'
+			&& isImageExtension(file.extension, this.attachmentTypes)
+			&& oldOccurrences.some(occurrence => extractReferencePath(occurrence.original)?.image === true)
+			? renderFigure({ src: file.path, stem: file.basename, width: this.settings.imageWidth })
+			: undefined
+		if (file.path === oldPath && !figureReplacement) return 'success'
+		const renamed = file.path !== oldPath
+		const synchronizationFailure = (mayHaveApplied = false): ExactBurstMutationStatus => {
+			const status = renamed ? 'renamed-but-unsynchronized' : mayHaveApplied ? 'partially-applied' : 'not-applied'
+			if (notify && this.isCurrent(generation)) {
+				const message = status === 'renamed-but-unsynchronized'
+					? `Renamed ${file.name}, but references could not be synchronized`
+					: status === 'partially-applied'
+						? `Changed ${file.name}, but references could not be synchronized`
+						: `Could not apply the requested change to ${file.name}`
+				new Notice(message)
+			}
+			return status
+		}
+		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourceFile.path)
+		const wikiDestination = this.app.metadataCache.fileToLinktext(file, sourceFile.path, false)
+		const markdownFallback = wikiDestination === file.name || wikiDestination === file.basename
+			? file.name
+			: relativeAttachmentPath(sourceFile.path, file.path)
+		const currentOccurrences = retargetCachedOccurrences(oldOccurrences, deriveRetargetDestinations(wikiDestination, newLinkText, markdownFallback))
+		const expectedNativeContent = expectedBatchNativeContent(prepared.content, oldOccurrences, currentOccurrences)
+		const readiness = await this.waitForBatchEditorContent(editorSession, sourceFile, prepared.content, expectedNativeContent, oldOccurrences.length > 0, generation)
+		if (!this.isCurrent(generation)) return synchronizationFailure()
+		if (readiness === null) return synchronizationFailure()
+		if ('detached' in readiness) {
+			let contentRejected = false
+			let contentChanged = false
+			let processResult: 'written' | 'cancelled'
+			try {
+				processResult = await processVaultText(this.app.vault, sourceFile, content => {
+					if (!batchDiskContentAllowed(content, prepared.content, expectedNativeContent)) {
+						contentRejected = true
+						return content
+					}
+					const nextContent = replaceBatchAttachmentContent(
+						content,
+						oldPath,
+						file.path,
+						oldStem,
+						file.basename,
+						oldOccurrences,
+						currentOccurrences,
+						figureReplacement,
+					)
+					if (nextContent === null) {
+						contentRejected = true
+						return content
+					}
+					contentChanged = nextContent !== content
+					return nextContent
+				}, () => this.isCurrent(generation))
+			} catch (error) {
+				if (this.isCurrent(generation)) {
+					console.error('Could not save synchronized attachment references', error)
+				}
+				return synchronizationFailure(contentChanged)
+			}
+			if (processResult === 'cancelled' || contentRejected) return synchronizationFailure()
+			return this.isCurrent(generation) ? 'success' : synchronizationFailure(contentChanged)
+		}
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return synchronizationFailure()
+		const capturedContent = editorSession.editor.getValue()
+		if (capturedContent !== prepared.content && capturedContent !== expectedNativeContent) return synchronizationFailure()
+		const capturedNextContent = replaceBatchAttachmentContent(
+			capturedContent,
+			oldPath,
+			file.path,
+			oldStem,
+			file.basename,
+			oldOccurrences,
+			currentOccurrences,
+			figureReplacement,
+		)
+		if (capturedNextContent === null) return synchronizationFailure()
+		const contentChanged = capturedNextContent !== capturedContent
+		const capturedChange = fullDocumentChange(capturedContent, capturedNextContent)
+		let writeResult: 'written' | 'conflict' | 'cancelled'
+		let liveMutationStarted = false
+		let liveDiskContent: string | null = null
+		const restoreLiveMutation = async (): Promise<boolean> => {
+			if (editorSession.editor.getValue() === capturedNextContent && capturedChange) {
+				const revert = fullDocumentChange(capturedNextContent, capturedContent)
+				try {
+					if (revert) editorSession.editor.transaction({ changes: [revert] })
+				} catch { return false }
+			}
+			if (editorSession.editor.getValue() !== capturedContent) return false
+			if (!liveMutationStarted || liveDiskContent === null) return true
+			if (await rollbackBatchSourceWrite(this.app.vault, sourceFile, capturedNextContent, liveDiskContent)) return true
+			try { return await this.app.vault.read(sourceFile) === liveDiskContent } catch { return false }
+		}
+		try {
+			writeResult = await compareAndWriteVaultText(
+				this.app.vault,
+				sourceFile,
+				content => {
+					liveDiskContent = content
+					return this.isCurrent(generation)
+						&& this.isBatchEditorSessionBound(editorSession, sourceFile)
+						&& editorSession.editor.getValue() === capturedContent
+						&& batchDiskContentAllowed(content, prepared.content, expectedNativeContent)
+				},
+				() => this.isCurrent(generation) && this.isBatchEditorSessionBound(editorSession, sourceFile),
+				capturedNextContent,
+				() => {
+					if (!this.isCurrent(generation)
+						|| !this.isBatchEditorSessionBound(editorSession, sourceFile)
+						|| editorSession.editor.getValue() !== capturedContent) return false
+					liveMutationStarted = contentChanged
+					if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
+					return true
+				},
+			)
+		} catch (error) {
+			const restored = await restoreLiveMutation()
+			if (this.isCurrent(generation)) {
+				console.error('Could not save synchronized attachment references', error)
+			}
+			return synchronizationFailure(liveMutationStarted && !restored)
+		}
+		if (writeResult === 'cancelled' || writeResult === 'conflict') return synchronizationFailure()
+		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return synchronizationFailure(contentChanged)
+		const latestContent = editorSession.editor.getValue()
+		const commitState = batchCommitEditorState(capturedContent, capturedNextContent, latestContent)
+		if (commitState === 'captured') {
+			if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
+		}
+		return advanceBatchEditorBaseline(editorSession, sourceFile.path, capturedNextContent, editorSession.view.file?.path, editorSession.view.editor)
+			? 'success'
+			: synchronizationFailure(contentChanged)
 	}
 
 	async renameBatchAttachment(
@@ -703,150 +982,7 @@ export default class PasteRenamePlugin extends Plugin {
 		editorSession: BatchEditorSession<Editor, MarkdownView>,
 		generation = this.cancellation.generation,
 	): Promise<boolean> {
-		const prepared = await this.prepareBatchSource(sourceFile, editorSession, generation)
-		if (!prepared || !this.isCurrent(generation)) return false
-		const freshGroups = groupCachedAttachments<TFile>(
-			prepared.content,
-			prepared.embeds,
-			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
-		).filter(group => isEligibleAttachmentExtension(group.file.extension, this.attachmentTypes))
-		const generatedPaths = extractGeneratedFigurePaths(prepared.content).filter(link => {
-			const generatedFile = this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path)
-			return generatedFile !== null && isEligibleAttachmentExtension(generatedFile.extension, this.attachmentTypes)
-		})
-		if (!attachmentTargetDiscovered(
-			freshGroups,
-			generatedPaths,
-			file.path,
-			link => this.app.metadataCache.getFirstLinkpathDest(link, sourceFile.path),
-		)) {
-			if (this.isCurrent(generation)) new Notice(`Could not revalidate ${file.name} in the active note`)
-			return false
-		}
-		const oldOccurrences = prepared.references.filter(occurrence =>
-			this.app.metadataCache.getFirstLinkpathDest(occurrence.link, sourceFile.path)?.path === file.path)
-		const oldPath = file.path
-		const oldStem = file.basename
-		const renameResult = await this.renameFile(file, newName, sourceFile.path, false, undefined, generation)
-		if (!renameResult.success) return false
-		if (!this.isCurrent(generation)) return false
-		if (file.path === oldPath) return true
-		if (!this.isCurrent(generation)) return false
-		const oldRelativePath = relativeAttachmentPath(sourceFile.path, oldPath)
-		const newRelativePath = relativeAttachmentPath(sourceFile.path, file.path)
-		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourceFile.path)
-		const wikiDestination = this.app.metadataCache.fileToLinktext(file, sourceFile.path, false)
-		const markdownFallback = wikiDestination === file.name || wikiDestination === file.basename
-			? file.name
-			: relativeAttachmentPath(sourceFile.path, file.path)
-		const currentOccurrences = retargetCachedOccurrences(oldOccurrences, deriveRetargetDestinations(wikiDestination, newLinkText, markdownFallback))
-		const expectedNativeContent = expectedBatchNativeContent(prepared.content, oldOccurrences, currentOccurrences)
-		const readiness = await this.waitForBatchEditorContent(editorSession, sourceFile, prepared.content, expectedNativeContent, oldOccurrences.length > 0, generation)
-		if (!this.isCurrent(generation)) return false
-		if (readiness === null) {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
-		}
-		if ('detached' in readiness) {
-			if (!this.isCurrent(generation)) return false
-			let contentRejected = false
-			let processResult: 'written' | 'cancelled'
-			try {
-				processResult = await processVaultText(this.app.vault, sourceFile, content => {
-					if (!batchDiskContentAllowed(content, prepared.content, expectedNativeContent)) {
-						contentRejected = true
-						return content
-					}
-					return replaceBatchAttachmentContent(
-						content,
-						oldRelativePath,
-						newRelativePath,
-						oldStem,
-						file.basename,
-						oldOccurrences,
-						currentOccurrences,
-					)
-				}, () => this.isCurrent(generation))
-			} catch (error) {
-				if (this.isCurrent(generation)) {
-					console.error('Could not save synchronized attachment references', error)
-					new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-				}
-				return false
-			}
-			if (processResult === 'cancelled') return false
-			if (contentRejected) {
-				if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-				return false
-			}
-			return this.isCurrent(generation)
-		}
-		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
-		const capturedContent = editorSession.editor.getValue()
-		if (capturedContent !== prepared.content && capturedContent !== expectedNativeContent) {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
-		}
-		const capturedNextContent = replaceBatchAttachmentContent(
-			capturedContent,
-			oldRelativePath,
-			newRelativePath,
-			oldStem,
-			file.basename,
-			oldOccurrences,
-			currentOccurrences,
-		)
-		const capturedChange = liveBatchAttachmentChange(
-			capturedContent,
-			oldRelativePath,
-			newRelativePath,
-			oldStem,
-			file.basename,
-			oldOccurrences,
-			currentOccurrences,
-		)
-		let writeResult: 'written' | 'conflict' | 'cancelled'
-		try {
-			writeResult = await compareAndWriteVaultText(
-				this.app.vault,
-				sourceFile,
-				content => this.isCurrent(generation)
-					&& this.isBatchEditorSessionBound(editorSession, sourceFile)
-					&& editorSession.editor.getValue() === capturedContent
-					&& batchDiskContentAllowed(content, prepared.content, expectedNativeContent),
-				() => this.isCurrent(generation) && this.isBatchEditorSessionBound(editorSession, sourceFile),
-				capturedNextContent,
-				() => {
-					if (!this.isCurrent(generation)
-						|| !this.isBatchEditorSessionBound(editorSession, sourceFile)
-						|| editorSession.editor.getValue() !== capturedContent) return false
-					if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
-					return true
-				},
-			)
-		} catch (error) {
-			if (this.isCurrent(generation)) {
-				console.error('Could not save synchronized attachment references', error)
-				new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			}
-			return false
-		}
-		if (writeResult === 'cancelled') return false
-		if (writeResult === 'conflict') {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
-		}
-		if (!this.isBatchEditorSessionBound(editorSession, sourceFile)) return false
-		const latestContent = editorSession.editor.getValue()
-		const commitState = batchCommitEditorState(capturedContent, capturedNextContent, latestContent)
-		if (commitState === 'drifted') {
-			if (this.isCurrent(generation)) new Notice(`Renamed ${file.name}, but references could not be synchronized`)
-			return false
-		}
-		if (commitState === 'captured') {
-			if (capturedChange) editorSession.editor.transaction({ changes: [capturedChange] })
-		}
-		return advanceBatchEditorBaseline(editorSession, sourceFile.path, capturedNextContent, editorSession.view.file?.path, editorSession.view.editor)
+		return (await this.renameBatchAttachmentOutcome(file, newName, sourceFile, editorSession, generation, true)) === 'success'
 	}
 
 	async waitForBatchEditorContent(
@@ -977,6 +1113,10 @@ export default class PasteRenamePlugin extends Plugin {
 		const file = view?.file
 		debugLog('active file', file?.path)
 		return file
+	}
+	getExactVaultFile(filePath: string): TFile | null {
+		const file = this.app.vault.getAbstractFileByPath(filePath)
+		return file instanceof TFile ? file : null
 	}
 	getBatchEditorSession(file: TFile): BatchEditorSession<Editor, MarkdownView> | null {
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView)

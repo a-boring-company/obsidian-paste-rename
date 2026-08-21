@@ -18,6 +18,9 @@ describe('attachment type file selection', () => {
 		expect(chooseAttachmentTypeConfig({ status: 'missing' }, '{')).toEqual({
 			config: DEFAULT_ATTACHMENT_TYPE_CONFIG, createUserFile: true, invalidUserFile: false, unreadableUserFile: false,
 		})
+		expect(chooseAttachmentTypeConfig({ status: 'missing' }, null)).toEqual({
+			config: DEFAULT_ATTACHMENT_TYPE_CONFIG, createUserFile: true, invalidUserFile: false, unreadableUserFile: false,
+		})
 	})
 
 	it('does not overwrite an invalid user file', () => {

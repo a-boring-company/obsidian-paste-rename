@@ -16,6 +16,23 @@ export interface CachedAttachmentGroup<T extends { path: string }> {
 	file: T
 }
 
+export function mapCachedOccurrencesByTargetPath<T extends { path: string }>(
+	occurrences: readonly CachedEmbedOccurrence[],
+	targetPaths: readonly string[],
+	resolve: (link: string) => T | null,
+): Map<string, CachedEmbedOccurrence[]> {
+	const targets = new Set(targetPaths)
+	const mapped = new Map<string, CachedEmbedOccurrence[]>()
+	for (const occurrence of occurrences) {
+		const file = resolve(occurrence.link)
+		if (!file || !targets.has(file.path)) continue
+		const targetOccurrences = mapped.get(file.path)
+		if (targetOccurrences) targetOccurrences.push(occurrence)
+		else mapped.set(file.path, [occurrence])
+	}
+	return mapped
+}
+
 type CachedReference = Pick<ReferenceCache, 'link' | 'original' | 'position'>
 type CachedEmbedInput = Pick<EmbedCache, 'link' | 'original' | 'position'> | CachedEmbedOccurrence
 
@@ -130,21 +147,39 @@ export function retargetCachedOccurrences(
 	occurrences: readonly CachedEmbedOccurrence[],
 	destinations: RetargetDestinations,
 ): CachedEmbedOccurrence[] {
-	return occurrences.map(occurrence => {
+	const retargeted = occurrences.map((occurrence, sourceIndex) => {
 		const parsed = extractReferencePath(occurrence.original)
-		if (!parsed) return occurrence
+		if (!parsed) return { sourceIndex, delta: 0, occurrence }
 		const destinationBase = parsed.kind === 'markdown' ? destinations.markdown : destinations.wiki
 		const destination = `${destinationBase}${splitSubpath(parsed.path)}`
 		const currentOriginal = `${occurrence.original.slice(0, parsed.destinationStart)}${destination}${occurrence.original.slice(parsed.destinationEnd)}`
 		return {
-			...occurrence,
-			link: destination,
-			original: currentOriginal,
-			end: occurrence.start + currentOriginal.length,
-			destinationStart: occurrence.start + parsed.destinationStart,
-			destinationEnd: occurrence.start + parsed.destinationStart + destination.length,
+			sourceIndex,
+			delta: currentOriginal.length - occurrence.original.length,
+			occurrence: {
+				...occurrence,
+				link: destination,
+				original: currentOriginal,
+				end: occurrence.start + currentOriginal.length,
+				destinationStart: occurrence.start + parsed.destinationStart,
+				destinationEnd: occurrence.start + parsed.destinationStart + destination.length,
+			},
 		}
 	})
+	const result = Array<CachedEmbedOccurrence>(retargeted.length)
+	let priorDelta = 0
+	for (const item of [...retargeted].sort((left, right) => left.occurrence.start - right.occurrence.start)) {
+		const occurrence = item.occurrence
+		result[item.sourceIndex] = {
+			...occurrence,
+			start: occurrence.start + priorDelta,
+			end: occurrence.end + priorDelta,
+			destinationStart: occurrence.destinationStart + priorDelta,
+			destinationEnd: occurrence.destinationEnd + priorDelta,
+		}
+		priorDelta += item.delta
+	}
+	return result
 }
 
 export function replaceRetargetedCachedOccurrences(

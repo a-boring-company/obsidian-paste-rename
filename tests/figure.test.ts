@@ -30,4 +30,16 @@ describe('figure rendering', () => {
 		expect(renderFigure({ src: '.././assets/parent file.png', stem: 'parent file' })).toContain('src=".././assets/parent%20file.png"')
 		expect(renderFigure({ src: 'folder/bad%name.png', stem: 'bad' })).toContain('src="folder/bad%25name.png"')
 	})
+
+	it.each([
+		['image.png', 'image.png', 'png'],
+		['assets/image.png', 'assets/image.png', 'png'],
+		['notes/image.png', 'notes/image.png', 'png'],
+		['notes/current/image.svg', 'notes/current/image.svg', 'svg'],
+		['assets/raw %/Đọc image.gif', 'assets/raw%20%25/%C4%90%E1%BB%8Dc%20image.gif', 'gif'],
+		['assets/photo 100%.jpeg', 'assets/photo%20100%25.jpeg', 'jpeg'],
+	] as const)('renders the canonical raw vault path once for %s', (rawPath, encodedPath, extension) => {
+		const rendered = renderFigure({ src: rawPath, stem: `image.${extension}` })
+		expect(rendered).toContain(`src="${encodedPath}"`)
+	})
 })

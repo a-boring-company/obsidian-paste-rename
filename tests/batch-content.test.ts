@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
-import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership } from '../src/batch-content'
-import { liveBatchAttachmentChange } from '../src/batch-content'
+import { advanceBatchEditorBaseline, BatchMetadataLedger, batchCommitEditorState, batchDiskContentAllowed, expectedBatchNativeContent, fingerprintUtf16Sha256, fullDocumentChange, hasBatchEditorOwnership, prepareExactSourceSnapshot, replaceBatchAttachmentContent, replaceBatchFigureContent, rollbackBatchSourceWrite } from '../src/batch-content'
 import { cacheEmbedOccurrences, retargetCachedOccurrences } from '../src/batch-occurrences'
 import { renderFigure } from '../src/figure'
 import { compareAndWriteVaultText } from '../src/vault-text'
@@ -47,18 +46,395 @@ describe('batch source content', () => {
 		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' })
 		const newFigure = renderFigure({ src: 'assets/new.png', stem: 'new' })
 		const current = `![[assets/new.pdf|Report]]\n${oldFigure}`
-		const change = liveBatchAttachmentChange(current, 'assets/old.png', 'assets/new.png', 'old', 'new')
+		const next = replaceBatchAttachmentContent(current, 'assets/old.png', 'assets/new.png', 'old', 'new')
 
-		expect(change).not.toBeNull()
-		expect(change?.text).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
+		expect(next).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
 	})
 
-	it('recomputes against the latest editor text before applying the transaction', () => {
-		const oldFigure = renderFigure({ src: 'assets/old.png', stem: 'old' })
-		const newFigure = renderFigure({ src: 'assets/new.png', stem: 'new' })
-		const latestEditor = `ordinary text changed during rename\n${oldFigure}`
-		const change = liveBatchAttachmentChange(latestEditor, 'assets/old.png', 'assets/new.png', 'old', 'new')
-		expect(change?.text).toBe(`ordinary text changed during rename\n${newFigure}`)
+	it('rejects figure conversion when exact provenance is unavailable', () => {
+		expect(replaceBatchFigureContent('unchanged', '<figure>new</figure>', 'assets/new.png', [])).toBeNull()
+		expect(replaceBatchFigureContent('![[assets/old.png]]', '<figure>new</figure>', 'assets/new.png', [{
+			link: 'assets/old.png', original: '![[assets/old.png]]', start: 1, end: 20, destinationStart: 4, destinationEnd: 19,
+		}])).toBeNull()
+	})
+
+	it('rolls back an interim exact-source write after cache preparation fails', async () => {
+		let disk = 'editor baseline'
+		let baselineAdvances = 0
+		let writes = 0
+		let cachePolls = 0
+		const file = {} as import('obsidian').TFile
+		const vault = {
+			process: async (_file: unknown, transform: (content: string) => string) => { disk = transform(disk); return disk },
+			read: async (_file: unknown) => disk,
+		}
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'editor snapshot',
+			disk: 'editor baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => {
+				writes += 1
+				recordSource(disk)
+				return compareAndWriteVaultText(vault, file, content => content === 'editor baseline', () => true, 'editor snapshot')
+			},
+			readExactCache: (): null => {
+				cachePolls += 1
+				return null
+			},
+			readDisk: async () => disk,
+			rollbackSnapshot: sourceContent => rollbackBatchSourceWrite(vault, file, 'editor snapshot', sourceContent),
+			advanceBaseline: () => {
+				baselineAdvances += 1
+				return true
+			},
+			retries: 2,
+			wait: async () => {},
+		})
+
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(writes).toBe(1)
+		expect(cachePolls).toBe(2)
+		expect(disk).toBe('editor baseline')
+		expect(baselineAdvances).toBe(0)
+	})
+
+	it('does not roll back when the guarded write finds the snapshot already autosaved', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => { recordSource('snapshot'); return 'written' },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(0)
+	})
+
+	it('returns the exact cached snapshot and advances the baseline only after disk agreement', async () => {
+		let baselineAdvances = 0
+		const cache = { fingerprint: 'exact' }
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'same',
+			disk: 'same',
+			isCurrent: () => true,
+			writeSnapshot: async () => { throw new Error('must not write an unchanged snapshot') },
+			readExactCache: () => cache,
+			readDisk: async () => 'same',
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => { baselineAdvances += 1; return true },
+		})
+		expect(result).toEqual({ value: cache, failure: null })
+		expect(baselineAdvances).toBe(1)
+	})
+
+	it('returns cancellation before any exact-source write when the generation is stale', async () => {
+		let writes = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => false,
+			writeSnapshot: async () => { writes += 1; return 'written' as const },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => true,
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+		expect(writes).toBe(0)
+	})
+
+	it.each([
+		['conflict', 'synchronize'],
+		['cancelled', 'cancelled'],
+	] as const)('returns %s write failure without attempting rollback', async (writeResult, failure) => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async () => writeResult,
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure })
+		expect(rollbacks).toBe(0)
+	})
+
+	it('returns synchronization failure when the interim source write throws', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => { recordSource('baseline'); throw new Error('write failed') },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(1)
+	})
+
+	it('returns synchronization when a rejected write left the original disk snapshot', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async () => { throw new Error('write rejected before persistence') },
+			readExactCache: (): null => null,
+			readDisk: async () => 'baseline',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(0)
+	})
+
+	it('returns synchronization when a rejected write left its autosaved source unchanged', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'initial baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => {
+				recordSource('autosaved baseline')
+				throw new Error('write rejected before persistence')
+			},
+			readExactCache: (): null => null,
+			readDisk: async () => 'autosaved baseline',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(rollbacks).toBe(0)
+	})
+
+	it.each([
+		['unknown', async (): Promise<string> => 'external'],
+		['unreadable', async (): Promise<string> => { throw new Error('read failed') }],
+	] as const)('returns rollback when a rejected write is %s to verify', async (_label, readDisk) => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async () => { throw new Error('write rejected') },
+			readExactCache: (): null => null,
+			readDisk,
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'rollback' })
+		expect(rollbacks).toBe(0)
+	})
+
+	it('returns rollback when a rejected applied write cannot be restored', async () => {
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => { recordSource('baseline'); throw new Error('write rejected after persistence') },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { rollbacks += 1; return false },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'rollback' })
+		expect(rollbacks).toBe(1)
+	})
+
+	it('rolls back when cancellation happens immediately after the interim write', async () => {
+		let checks = 0
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => ++checks === 1,
+			writeSnapshot: async recordSource => { recordSource('baseline'); return 'written' },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+		expect(rollbacks).toBe(1)
+	})
+
+	it('rejects a cached snapshot when the disk never reaches the same fingerprint', async () => {
+		let waits = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'snapshot',
+			isCurrent: () => true,
+			writeSnapshot: async () => 'written',
+			readExactCache: () => ({ fingerprint: 'exact' }),
+			readDisk: async () => 'different',
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => true,
+			retries: 2,
+			wait: async () => { waits += 1 },
+		})
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(waits).toBe(1)
+	})
+
+	it('rolls back when the editor drifts while reading the post-cache disk snapshot', async () => {
+		let current = true
+		let rollbacks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			isSnapshotCurrent: () => current,
+			writeSnapshot: async recordSource => { recordSource('baseline'); return 'written' },
+			readExactCache: () => ({ fingerprint: 'exact' }),
+			readDisk: async () => { current = false; return 'snapshot' },
+			rollbackSnapshot: async () => { rollbacks += 1; return true },
+			advanceBaseline: () => true,
+		})
+
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+		expect(rollbacks).toBe(1)
+	})
+
+	it('continues polling when cache or disk reads fail and reports a baseline failure', async () => {
+		let cacheReads = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'same',
+			disk: 'same',
+			isCurrent: () => true,
+			writeSnapshot: async () => 'written',
+			readExactCache: () => {
+				cacheReads += 1
+				if (cacheReads === 1) throw new Error('cache unavailable')
+				return { fingerprint: 'exact' }
+			},
+			readDisk: async () => { throw new Error('disk unavailable') },
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => false,
+			retries: 2,
+			wait: async () => {},
+		})
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+		expect(cacheReads).toBe(2)
+	})
+
+	it('cancels after an exact cache match if the generation changes before commit', async () => {
+		let checks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'same',
+			disk: 'same',
+			isCurrent: () => ++checks < 3,
+			writeSnapshot: async () => 'written',
+			readExactCache: () => ({ fingerprint: 'exact' }),
+			readDisk: async () => 'same',
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => true,
+		})
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+	})
+
+	it('reports cancellation when the baseline cannot advance after exact cache agreement', async () => {
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'same',
+			disk: 'same',
+			isCurrent: () => true,
+			writeSnapshot: async () => 'written',
+			readExactCache: () => ({ fingerprint: 'exact' }),
+			readDisk: async () => 'same',
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => false,
+		})
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+	})
+
+	it('reports rollback when a written snapshot cannot be restored', async () => {
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'snapshot',
+			disk: 'baseline',
+			isCurrent: () => true,
+			writeSnapshot: async recordSource => { recordSource('baseline'); return 'written' },
+			readExactCache: (): null => null,
+			readDisk: async () => 'snapshot',
+			rollbackSnapshot: async () => { throw new Error('rollback unavailable') },
+			advanceBaseline: () => true,
+			retries: 1,
+		})
+		expect(result).toEqual({ value: null, failure: 'rollback' })
+	})
+
+	it('stops polling when the generation changes between exact-cache attempts', async () => {
+		let checks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'same',
+			disk: 'same',
+			isCurrent: () => ++checks === 1,
+			writeSnapshot: async () => 'written',
+			readExactCache: (): null => null,
+			readDisk: async () => 'same',
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => true,
+			retries: 2,
+			wait: async () => {},
+		})
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+	})
+
+	it('returns cancellation when the final exact-cache attempt observes a stale generation', async () => {
+		let checks = 0
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'same',
+			disk: 'same',
+			isCurrent: () => ++checks < 3,
+			writeSnapshot: async () => 'written',
+			readExactCache: (): null => null,
+			readDisk: async () => 'same',
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => true,
+			retries: 1,
+		})
+		expect(result).toEqual({ value: null, failure: 'cancelled' })
+	})
+
+	it('returns synchronization failure when the polling delay rejects', async () => {
+		const result = await prepareExactSourceSnapshot({
+			snapshot: 'same',
+			disk: 'same',
+			isCurrent: () => true,
+			writeSnapshot: async () => 'written',
+			readExactCache: (): null => null,
+			readDisk: async () => 'same',
+			rollbackSnapshot: async () => false,
+			advanceBaseline: () => true,
+			retries: 2,
+			wait: async () => { throw new Error('timer failed') },
+		})
+		expect(result).toEqual({ value: null, failure: 'synchronize' })
+	})
+
+	it('reports rollback failure when the guarded source write cannot be restored', async () => {
+	const file = {} as import('obsidian').TFile
+		const unchangedVault = {
+			process: async (_file: unknown, transform: (content: string) => string) => transform('unchanged'),
+			read: async (_file: unknown) => 'different',
+		}
+		expect(await rollbackBatchSourceWrite(unchangedVault, file, 'snapshot', 'baseline')).toBe(false)
+		const throwingVault = {
+			process: async (_file: unknown, _transform: (content: string) => string): Promise<string> => { throw new Error('write failed') },
+			read: async (_file: unknown) => 'snapshot',
+		}
+		expect(await rollbackBatchSourceWrite(throwingVault, file, 'snapshot', 'baseline')).toBe(false)
 	})
 
 	it('updates old embedded destinations together with generated figures', () => {
@@ -66,9 +442,35 @@ describe('batch source content', () => {
 		const newFigure = renderFigure({ src: 'assets/new.png', stem: 'new' })
 		const current = `![[assets/old.pdf|Report]]\n${oldFigure}`
 		const oldOccurrences = cachedEmbed(current, '![[assets/old.pdf|Report]]')
-		const change = liveBatchAttachmentChange(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
+		const next = replaceBatchAttachmentContent(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
 
-		expect(change?.text).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
+		expect(next).toBe(`![[assets/new.pdf|Report]]\n${newFigure}`)
+	})
+
+	it('rejects a live figure change when exact occurrence provenance is stale', () => {
+		const current = '![[assets/old.png]]'
+		const oldOccurrences = cachedEmbed(current, current)
+		const currentOccurrences = retargetCachedOccurrences(oldOccurrences, {
+			wiki: 'assets/new-long-name.png',
+			markdown: 'assets/new-long-name.png',
+		}).map(occurrence => ({
+			...occurrence,
+			start: occurrence.start + 1,
+			end: occurrence.end + 1,
+			destinationStart: occurrence.destinationStart + 1,
+			destinationEnd: occurrence.destinationEnd + 1,
+		}))
+
+		expect(replaceBatchAttachmentContent(
+			current,
+			'assets/old.png',
+			'assets/new-long-name.png',
+			'old',
+			'new-long-name',
+			oldOccurrences,
+			currentOccurrences,
+			renderFigure({ src: 'assets/new-long-name.png', stem: 'new-long-name' }),
+		)).toBeNull()
 	})
 
 	it('accepts only the captured baseline or exact native-link variant', () => {
@@ -121,18 +523,18 @@ describe('batch source content', () => {
 	it('preserves Markdown image labels and titles while updating the destination', () => {
 		const current = '![Report](assets/old.pdf "Title")'
 		const oldOccurrences = cachedEmbed(current, current)
-		const change = liveBatchAttachmentChange(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
+		const next = replaceBatchAttachmentContent(current, 'assets/old.png', 'assets/new.png', 'old', 'new', oldOccurrences, retargetCachedOccurrences(oldOccurrences, { wiki: 'assets/new.pdf', markdown: 'assets/new.pdf' }))
 
-		expect(change?.text).toBe('![Report](assets/new.pdf "Title")')
+		expect(next).toBe('![Report](assets/new.pdf "Title")')
 	})
 
 	it('uses an actual generated shortest link for wiki destinations', () => {
-		const change = liveBatchAttachmentChange(
+		const next = replaceBatchAttachmentContent(
 			'![[old.png|Report]]', 'assets/old.png', 'assets/new.png', 'old', 'new',
 			cachedEmbed('![[old.png|Report]]', '![[old.png|Report]]'),
 			retargetCachedOccurrences(cachedEmbed('![[old.png|Report]]', '![[old.png|Report]]'), { wiki: 'new.png', markdown: 'new.png' }),
 		)
-		expect(change?.text).toBe('![[new.png|Report]]')
+		expect(next).toBe('![[new.png|Report]]')
 	})
 
 	it('keeps the captured source editor bound when focus switches files', () => {
