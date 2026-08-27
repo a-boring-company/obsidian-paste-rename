@@ -445,6 +445,35 @@ describe('PasteRenamePlugin burst notification boundaries', () => {
 		expect(noticeMessages).toEqual(['Skipped 1 attachment because the requested change could not be applied.'])
 	})
 
+	it('accepts a figure commit already reflected in the active editor', async () => {
+		const paths = ['assets/first.png', 'assets/second.pdf']
+		const content = paths.map(path => `![[${path}]]`).join('\n')
+		const { app, diskContent, editor, editorSession, files, plugin, sourceFile } = createBurstProductionHarness({
+			filePaths: paths, content, imageOutput: 'html',
+		})
+		const expectedContent = `${renderFigure({ src: paths[0], stem: files[0].basename, width: plugin.settings.imageWidth })}\n\n![[${paths[1]}]]`
+		const vault = app.vault as unknown as { process: (file: TFile, transform: (value: string) => string) => Promise<string> }
+		const originalProcess = vi.mocked(vault.process).getMockImplementation()!
+		vi.spyOn(vault, 'process').mockImplementation(async (target, transform) => {
+			const result = await originalProcess(target, transform)
+			if (result === expectedContent) {
+				editor.transaction({ changes: [{ from: { line: 0, ch: 0 }, to: { line: 1, ch: `![[${paths[1]}]]`.length }, text: result }] })
+			}
+			return result
+		})
+		vi.spyOn(plugin, 'getBatchEditorSession').mockReturnValue(editorSession)
+		vi.spyOn(plugin, 'generateNewName').mockImplementation(file => ({ stem: file.basename, newName: file.name, isMeaningful: false }))
+		vi.spyOn(plugin, 'openRenameModal').mockResolvedValue({ action: 'cancel', applyToRemaining: true })
+
+		await plugin.processRenameBurst(files.map(file => ({ ...request(file, sourceFile), autoRename: false })))
+
+		expect(editor.getValue()).toBe(expectedContent)
+		expect(diskContent()).toBe(expectedContent)
+		expect(editorSession.baselineContent).toBe(expectedContent)
+		expect(editorSession.view.data).toBe(expectedContent)
+		expect(noticeMessages).toEqual([])
+	})
+
 	it('restores the exact autosaved process input when figure conversion rejects after transforming', async () => {
 		const filePath = 'assets/first.png'
 		const originalDisk = `![[${filePath}]]`
