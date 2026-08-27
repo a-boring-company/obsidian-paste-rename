@@ -392,11 +392,13 @@ export default class PasteRenamePlugin extends Plugin {
 		if (writeResult !== 'written') {
 			return false
 		}
-		if (!editorStillCaptured()) {
+		if (!this.isCurrent(generation) || !this.isBatchEditorSessionBound(editorSession, sourceFile)) {
 			return await restoreMutation() ? false : 'partially-applied'
 		}
+		const commitState = batchCommitEditorState(capturedContent, nextContent, editorSession.editor.getValue())
+		if (commitState === 'drifted') return await restoreMutation() ? false : 'partially-applied'
 		try {
-			editorSession.editor.transaction({ changes: [change] })
+			if (commitState === 'captured') editorSession.editor.transaction({ changes: [change] })
 		} catch (error) {
 			const restored = await restoreMutation()
 			if (this.isCurrent(generation)) console.error('Could not reconcile synchronized attachment figures', error)
