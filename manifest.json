@@ -1,7 +1,7 @@
 {
 	"id": "paste-rename",
 	"name": "Paste Rename",
-	"version": "2.0.0",
+	"version": "2.0.1",
 	"minAppVersion": "1.1.1",
 	"description": "Rename pasted images and other attachments as they are added to your vault.",
 	"author": "A Boring Company",
