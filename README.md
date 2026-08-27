@@ -2,7 +2,9 @@
 
 Paste Rename renames images and other attachments when they are added to an [Obsidian](https://obsidian.md/) vault. It is the maintained successor to [Paste image rename](https://github.com/reorx/obsidian-paste-image-rename).
 
-The successor uses repository slug `obsidian-paste-rename`, plugin ID `paste-rename`, and display name **Paste Rename**. Version 2.0.0 requires Obsidian 1.1.1 or newer for atomic vault processing and metadata change events. It is not yet listed in Obsidian's Community Plugins directory.
+The successor uses repository slug `obsidian-paste-rename`, plugin ID `paste-rename`, and display name **Paste Rename**. Version 2.0.1 requires Obsidian 1.1.1 or newer for atomic vault processing and metadata change events. It is not yet listed in Obsidian's Community Plugins directory.
+
+Version 2.0.1 fixes figure-only conversion when Obsidian reflects the committed note content into the active editor before the vault write resolves. Migration remains forward-only: historic generated figures with note-relative paths are not specially recognized or migrated.
 
 ## Install
 

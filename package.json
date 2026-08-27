@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-paste-rename",
-	"version": "2.0.0",
+	"version": "2.0.1",
 	"description": "Rename pasted images and other attachments in Obsidian.",
 	"main": "main.js",
 	"scripts": {
